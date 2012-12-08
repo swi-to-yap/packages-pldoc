@@ -1,11 +1,9 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@cs.vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 2009-2010, University of Amsterdam
+    Copyright (C): 2009-2012, University of Amsterdam
 			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
@@ -46,6 +44,7 @@
 	    pred_edit_button//2,	% +PredInd, +Options, //
 	    object_edit_button//2,	% +Obj, +Options, //
 	    object_source_button//2,	% +Obj, +Options, //
+	    doc_resources//1,		% +Options
 					% Support other backends
 	    doc_file_objects/5,		% +FSpec, -File, -Objs, -FileOpts, +Opts
 	    existing_linked_file/2,	% +FileSpec, -Path
@@ -226,21 +225,51 @@ doc_for_file(FileSpec, Options) :-
 			   File),
 	file_base_name(File, Base),
 	Title = Base,
-	reply_html_page(pldoc(result),
-			title(Title),
-			\prolog_file(FileSpec, Options)).
+	doc_write_page(
+	    pldoc(result),
+	    title(Title),
+	    \prolog_file(FileSpec, Options),
+	    Options).
+
+:- html_meta doc_write_page(+, html, html, +).
+
+doc_write_page(Style, Head, Body, Options) :-
+	option(files(_), Options), !,
+	phrase(page(Style, Head, Body), HTML),
+	print_html(HTML).
+doc_write_page(Style, Head, Body, _) :-
+	reply_html_page(Style, Head, Body).
+
 
 prolog_file(FileSpec, Options) -->
 	{ doc_file_objects(FileSpec, File, Objects, FileOptions, Options),
 	  b_setval(pldoc_file, File),	% TBD: delete?
 	  file_directory_name(File, Dir)
 	},
-	html([ \html_requires(pldoc),
+	html([ \doc_resources(Options),
 	       \doc_links(Dir, FileOptions),
 	       \file_header(File, FileOptions)
 	     | \objects(Objects, FileOptions)
 	     ]),
 	undocumented(Objects, FileOptions).
+
+%%	doc_resources(+Options)// is det.
+%
+%	Include required resources (CSS, JS) into  the output. The first
+%	clause supports doc_files.pl. A bit hacky ...
+
+doc_resources(Options) -->
+	{ option(resource_directory(ResDir), Options),
+	  nb_current(pldoc_output, OutputFile), !,
+	  directory_file_path(ResDir, 'pldoc.css', Res),
+	  relative_file_name(Res, OutputFile, Ref)
+	},
+	html_requires(Ref).
+doc_resources(Options) -->
+	{ option(html_resources(Resoures), Options, pldoc)
+	},
+	html_requires(Resoures).
+
 
 %%	doc_file_objects(+FileSpec, -File, -Objects, -FileOptions, +Options) is det.
 %
@@ -1115,7 +1144,9 @@ pred_source_button(_, _) -->
 %	Create a button	for showing the source of Object.
 
 object_source_button(PI, Options) -->
-	{ is_pi(PI) }, !,
+	{ is_pi(PI),
+	  option(source_link(true), Options, true)
+	}, !,
 	pred_source_button(PI, Options).
 object_source_button(_, _) -->
 	[].
@@ -1344,14 +1375,19 @@ predref(Callable, Module, Options) -->
 
 %%	manref(+NameArity, -HREF, +Options) is det.
 %
-%	Create reference to a manual page.
+%	Create reference to a manual page.  When generating files, this
+%	listens to the option man_server(+Server).
 
 manref(Name/Arity, HREF, Options) :-
 	format(string(FragmentId), '~w/~d', [Name, Arity]),
 	(   option(files(_Map), Options)
-	->  uri_query_components(Query, [predicate=FragmentId]),
-	    uri_data(authority, Components, 'www.swi-prolog.org'),
-	    uri_data(path, Components, '/pldoc/man'),
+	->  option(man_server(Server), Options,
+		   'http://www.swi-prolog.org/pldoc'),
+	    uri_components(Server, Comp0),
+	    uri_data(path, Comp0, Path0),
+	    directory_file_path(Path0, man, Path),
+	    uri_data(path, Comp0, Path, Components),
+	    uri_query_components(Query, [predicate=FragmentId]),
 	    uri_data(search, Components, Query),
 	    uri_components(HREF, Components)
 	;   http_link_to_id(pldoc_man, [predicate=FragmentId], HREF)
@@ -1547,17 +1583,6 @@ in_file(Module, Head, File) :-
 	current_module(Module),
 	source_file(Module:Head, File).
 
-
-delete_common_prefix([H|T01], [H|T02], T1, T2) :- !,
-        delete_common_prefix(T01, T02, T1, T2).
-delete_common_prefix(T1, T2, T1, T2).
-
-to_dot_dot([], Tail, Tail).
-to_dot_dot([_], Tail, Tail) :- !.
-to_dot_dot([_|T0], ['..'|T], Tail) :-
-        to_dot_dot(T0, T, Tail).
-
-
 %%     file(+FileName)// is det.
 %%     file(+FileName, +Options)// is det.
 %
@@ -1674,7 +1699,9 @@ file_href(Path, HREF) :-		% a loaded Prolog file
 	source_file(Path), !,
 	doc_file_href(Path, HREF).
 file_href(Path, HREF) :-
-	nb_current(pldoc_file, CFile),
+	(   nb_current(pldoc_output, CFile)
+	;   nb_current(pldoc_file, CFile)
+	),
 	CFile \== [], !,
 	relative_file_name(Path, CFile, HREF).
 file_href(Path, Path).

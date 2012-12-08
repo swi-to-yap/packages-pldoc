@@ -1,11 +1,9 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@cs.vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 1985-2010, University of Amsterdam
+    Copyright (C): 1985-2012, University of Amsterdam
 			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
@@ -60,6 +58,7 @@
 		     [ directory(atom),
 		       edit(boolean),
 		       files(list),
+		       members(list),
 		       qualify(boolean),
 		       secref_style(oneof([number, title, number_title])),
 		       pass_to(doc_links/4, 2)
@@ -100,24 +99,40 @@ doc_for_dir(DirSpec, Options) :-
 			   ],
 			   Dir),
 	file_base_name(Dir, Base),
-	reply_html_page(pldoc(dir_index),
-			title(Base),
-			\dir_index(Dir, Options)).
+	doc_write_page(
+	    pldoc(dir_index),
+	    title(Base),
+	    \dir_index(Dir, Options),
+	    Options).
+
+:- html_meta doc_write_page(+, html, html, +).
+
+doc_write_page(Style, Head, Body, Options) :-
+	option(files(_), Options), !,
+	phrase(page(Style, Head, Body), HTML),
+	print_html(HTML).
+doc_write_page(Style, Head, Body, _) :-
+	reply_html_page(Style, Head, Body).
 
 
 %%	dir_index(+Dir, +Options)//
 %
 %	Create an index for all Prolog files appearing in Dir or in
-%	any directory contained in Dir.
+%	any directory contained in Dir.  Options:
+%
+%	  * members(+Members)
+%	  Documented members.  See doc_files.pl
 
 dir_index(Dir, Options) -->
 	{ dir_source_files(Dir, Files0, Options),
 	  sort(Files0, Files),
-	  atom_concat(Dir, '/index.html', File),
+	  directory_file_path(Dir, 'index.html', File),
 	  b_setval(pldoc_file, File)	% for predref
 	},
-	html([ \doc_links(Dir, Options),
+	html([ \doc_resources(Options),
+	       \doc_links(Dir, Options),
 	       \dir_header(Dir, Options),
+	       \subdir_links(Dir, Options),
 	       table(class(summary),
 		     \file_indices(Files, [directory(Dir)|Options])),
 	       \dir_footer(Dir, Options)
@@ -127,6 +142,9 @@ dir_index(Dir, Options) -->
 %
 %	Create a list of source-files to be documented as part of Dir.
 
+dir_source_files(_, Files, Options) :-
+	option(members(Members), Options), !,
+	findall(F, member(file(F,_Doc), Members), Files).
 dir_source_files(DirSpec, Files, _Options) :-
 	absolute_file_name(DirSpec, Dir,
 			   [ file_type(directory),
@@ -137,6 +155,31 @@ dir_source_files(DirSpec, Files, _Options) :-
 source_file_in_dir(Dir, File) :-
 	source_file(File),
 	file_directory_name(File, Dir).
+
+%%	subdir_links(+Dir, +Options)// is det.
+%
+%	Create links to subdirectories
+
+subdir_links(Dir, Options) -->
+	{ option(members(Members), Options),
+	  findall(SubDir, member(directory(SubDir, _, _), Members), SubDirs),
+	  SubDirs \== []
+	},
+	html(table(class(subdirs),
+		   \subdir_link_rows(SubDirs, Dir))).
+subdir_links(_, _) --> [].
+
+subdir_link_rows([], _) --> [].
+subdir_link_rows([H|T], Dir) -->
+	subdir_link_row(H, Dir),
+	subdir_link_rows(T, Dir).
+
+subdir_link_row(Dir, From) -->
+	{ directory_file_path(Dir, 'index.html', Index),
+	  relative_file_name(Index, From, Link),
+	  file_base_name(Dir, Base)
+	},
+	html(tr(td(a(href(Link), Base)))).
 
 %%	dir_header(+Dir, +Options)// is det.
 %
@@ -353,11 +396,13 @@ doc_links(_Directory, Options) -->
 	{ option(files(_), Options), !
 	}.
 doc_links(Directory, Options) -->
-	{   Directory == ''
-	->  working_directory(Dir, Dir)
-	;   Dir = Directory
+	{   (   Directory == ''
+	    ->  working_directory(Dir, Dir)
+	    ;   Dir = Directory
+	    ),
+	    option(html_resources(Resoures), Options, pldoc)
 	},
-	html([ \html_requires(pldoc),
+	html([ \html_requires(Resoures),
 	       div(class(navhdr),
 		   [ div(class(jump),
 			  div([ \places_menu(Dir),

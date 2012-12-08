@@ -1,11 +1,10 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
-    E-mail:        wielemak@science.uva.nl
+    E-mail:        J.Wielemaker@vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 1985-2007, University of Amsterdam
+    Copyright (C): 2007-2012, University of Amsterdam
+			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
     modify it under the terms of the GNU General Public License
@@ -19,7 +18,8 @@
 
     You should have received a copy of the GNU General Public
     License along with this library; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+    MA 02110-1301 USA
 
     As a special exception, if you link this library with other files,
     compiled with a Free Software compiler, to produce an executable, this
@@ -32,8 +32,9 @@
 :- module(pldoc_files,
 	  [ doc_save/2			% +File, +Options
 	  ]).
-:- use_module(doc_html).
-:- use_module(doc_index).
+:- use_module(library(pldoc), []).
+:- use_module(pldoc(doc_html)).
+:- use_module(pldoc(doc_index)).
 :- use_module(library(option)).
 :- use_module(library(lists)).
 
@@ -45,11 +46,22 @@ in progress, providing search and guaranteed consistency with the loaded
 version. Creating stand-alone files as  provided   by  this  file can be
 useful for printing or distribution.
 
-@tbd	Handle CSS files
-@tbd	Suppress search header
-@tbd	Fix filenames (.pl --> .html)
-@tbd	Fix predicate references
+@tbd	Check links
+@tbd	Nice frontend for common scenarios
+	- Generate documentation for a pack (README in top; files in Prolog)
+	- Default save into a doc subdirectory?
 */
+
+:- predicate_options(doc_save/2, 2,
+		     [ format(oneof([html])),
+		       doc_root(atom),
+		       man_server(atom),
+		       index_file(atom),
+		       if(onceof([loaded,true])),
+		       recursive(boolean),
+		       css(oneof([copy,inline]))
+		     ]).
+
 
 %%	doc_save(+FileOrDir, +Options)
 %
@@ -66,7 +78,7 @@ useful for printing or distribution.
 %		* man_server(+RootURL)
 %		Root of a manual server used for references to built-in
 %		predicates. Default is
-%		=|http://gollem.science.uva.nl/SWI-Prolog/pldoc/|=
+%		=|http://www.swi-prolog.org/pldoc/|=
 %
 %		* index_file(+Base)
 %		Filename for directory indices.  Default is =index=.
@@ -82,18 +94,24 @@ useful for printing or distribution.
 %		* css(+Mode)
 %		If =copy=, copy the CSS file to created directories.
 %		Using =inline=, include the CSS file into the created
-%		files.
+%		files.  Currently, only the default =copy= is supported.
 %
-%	@tbd	Copy CSS files, inline CSS files
+%	@tbd	Inline CSS files
 
 doc_save(Spec, Options) :-
 	doc_target(Spec, Target, Options),
-	phrase(file_map(Target), FileMap), % Assoc?
-	Options1 = [files(FileMap)|Options],
-	nb_setval(pldoc_options, Options1),
-	call_cleanup(generate(Target, Options1),
-		     nb_delete(pldoc_options)).
-
+	target_directory(Target, Dir),
+	phrase(file_map(Target), FileMap),
+	merge_options([ html_resources(pldoc_files),
+			source_link(false),
+			resource_directory(Dir)
+		      ], Options, Options1),
+	Options2 = [files(FileMap)|Options1],
+	setup_call_cleanup(
+	    nb_setval(pldoc_options, Options2),
+	    generate(Target, Options2),
+	    nb_delete(pldoc_options)),
+	copy_resources(Dir, Options2).
 
 %%	generate(+Spec, +Options) is det.
 %
@@ -102,16 +120,23 @@ doc_save(Spec, Options) :-
 
 generate([], _).
 generate([H|T], Options) :-
-	generate(H, Options),
+	\+ \+ generate(H, Options),
 	generate(T, Options).
 generate(file(PlFile, DocFile), Options) :-
-	open(DocFile, write, Out, [encoding(utf8)]),
-	call_cleanup(with_output_to(Out, doc_for_file(PlFile, Options)),
-		     close(Out)).
+	b_setval(pldoc_output, DocFile),
+	setup_call_cleanup(
+	    open(DocFile, write, Out, [encoding(utf8)]),
+	    with_output_to(Out, doc_for_file(PlFile, Options)),
+	    close(Out)).
 generate(directory(Dir, IndexFile, Members), Options) :-
-	open(IndexFile, write, Out, [encoding(utf8)]),
-	call_cleanup(with_output_to(Out, doc_for_dir(Dir, Options)),
-		     close(Out)),
+	b_setval(pldoc_output, IndexFile),
+	setup_call_cleanup(
+	    open(IndexFile, write, Out, [encoding(utf8)]),
+	    with_output_to(Out, doc_for_dir(Dir,
+					    [ members(Members)
+					    | Options
+					    ])),
+	    close(Out)),
 	generate(Members, Options).
 
 
@@ -124,7 +149,7 @@ generate(directory(Dir, IndexFile, Members), Options) :-
 %		Document PlFile in DocFile
 %
 %		* directory(Dir, IndexFile, Members)
-%		Document Dir in IndexFile.  Memmbers is a list of
+%		Document Dir in IndexFile.  Members is a list of
 %		documentation structures.
 
 doc_target(FileOrDir, file(File, DocFile), Options) :-
@@ -147,6 +172,10 @@ doc_target(FileOrDir, directory(Dir, Index, Members), Options) :-
 		),
 		Members).
 
+target_directory(directory(_, Index, _), Dir) :-
+	file_directory_name(Index, Dir).
+target_directory(file(_, DocFile), Dir) :-
+	file_directory_name(DocFile, Dir).
 
 %%	file_map(+DocStruct, -List)
 %
@@ -261,3 +290,23 @@ prolog_file_in_dir(Dir, SubDir, Options) :-
 
 blocked('.plrc').
 blocked('INDEX.pl').
+
+
+		 /*******************************
+		 *	     RESOURCES		*
+		 *******************************/
+
+%%	copy_resources(+Dir, +Options)
+
+copy_resources(Dir, Options) :-
+	option(format(Format), Options, html),
+	forall(doc_resource(Format, Res),
+	       ( absolute_file_name(pldoc(Res), File, [access(read)]),
+		 copy_file(File, Dir))).
+
+doc_resource(html, 'pldoc.css').
+doc_resource(html, 'h1-bg.png').
+doc_resource(html, 'h2-bg.png').
+doc_resource(html, 'multi-bg.png').
+doc_resource(html, 'priv-bg.png').
+doc_resource(html, 'pub-bg.png').
