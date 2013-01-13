@@ -32,7 +32,7 @@
 
 :- module(pldoc_process,
 	  [ doc_comment/4,		% ?Object, ?Pos, ?Summary, ?Comment
-	    read_structured_comments/2,	% +File, -Comments
+	    doc_file_has_comments/1,	% +File
 	    is_structured_comment/2,	% +Comment, -Prefixes
 	    process_comments/3,		% +Comments, +StartTermPos, +File
 	    doc_file_name/3		% +Source, -Doc, +Options
@@ -76,55 +76,6 @@ well formatted HTML documents.
 :- multifile
 	prolog:predicate_summary/2.	% ?PI, -Summary
 
-
-		 /*******************************
-		 *	    READING MODE	*
-		 *******************************/
-
-%%	read_structured_comments(+File, -Comments) is det.
-%
-%	Read the structured comments from file.
-
-read_structured_comments(Source, Comments) :-
-	prolog_canonical_source(Source, Id),
-	prolog_open_source(Id, In),
-	call_cleanup((read_comments(In, Term0, Comments0),
-		      read_comments(Term0, Comments0, In, Comments)),
-		     cleanup(In)).
-
-cleanup(In) :-
-	prolog_close_source(In).
-
-read_comments(end_of_file, Comments0, _, Comments) :- !,
-	structured_comments(Comments0, Comments, []).
-read_comments(_, Comments0, In, Comments) :-
-	structured_comments(Comments0, Comments, Tail),
-	read_comments(In, Term1, Comments1),
-	read_comments(Term1, Comments1, In, Tail).
-
-structured_comments([], T, T).
-structured_comments([H|Comments], [H|T0], T) :-
-	is_structured_comment(H, _), !,
-	structured_comments(Comments, T0, T).
-structured_comments([_|Comments], T0, T) :-
-	structured_comments(Comments, T0, T).
-
-
-%%	read_comments(+In:stream, -Term, -Comments:list) is det.
-%
-%	Read next term and its comments from   In.  If a syntax error is
-%	encountered, it is printed and  reading   continues  to the next
-%	term.
-
-read_comments(In, Term, Comments) :-
-	repeat,
-	catch(prolog_read_source_term(In, Term, _Expanded,
-				      [ comments(Comments)
-				      ]),
-	      E,
-	      (	  print_message(error, E),
-		  fail
-	      )), !.
 
 %%	is_structured_comment(+Comment:string,
 %%			      -Prefixes:list(codes)) is semidet.
@@ -233,6 +184,16 @@ doc_file_name(Source, Doc, Options) :-
 	->  throw(error(permission_error(overwrite, Source), _))
 	;   true
 	).
+
+%%	doc_file_has_comments(+Source:atom) is semidet.
+%
+%	True if we have loaded comments from Source.
+
+doc_file_has_comments(Source) :-
+	source_file_property(Source, module(M)),
+	locally_defined(M:'$pldoc'/4),
+	M:'$pldoc'(_, _, _, _).
+
 
 %%	doc_comment(?Objects, -Pos,
 %%		    -Summary:string, -Comment:string) is nondet.

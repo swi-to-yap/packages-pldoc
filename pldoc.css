@@ -10,10 +10,12 @@
 
 h1.file, h1.module, h1.dir, h1.wiki
 { background: url("h1-bg.png") top left;
+  clear: both;
 }
 
-h2.wiki
+h2.wiki,h3.wiki,h4.wiki
 { background: url("h2-bg.png") top left;
+  clear: both;
 }
 
 .undef
@@ -58,18 +60,22 @@ dt.keyword-bug, dt.keyword-deprecated, dt.keyword-tbd
 
 dt.pubdef
 { background: url("pub-bg.png") top left;
+  overflow: hidden;
 }
 
 dt.multidef
 { background: url("multi-bg.png") top left;
+  overflow: hidden;
 }
 
 dt.privdef
 { background: url("priv-bg.png") top left;
+  overflow: hidden;
 }
 
 dt.undoc, h2.undoc
 { background-color: #ffbc87;
+  overflow: hidden;
 }
 
 img.action
@@ -204,6 +210,22 @@ table.summary td
 tr.private
 { color: #707070;
   background-color: #fbffa6;
+}
+
+/* Packs */
+
+table.packs
+{ margin-left: 5%;
+  border: 1px solid;
+}
+
+table.packs th
+{ background: url("h2-bg.png") top left;
+  text-align: left;
+}
+
+option.packs
+{ font-weight: bold;
 }
 
 /* Search */

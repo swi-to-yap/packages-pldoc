@@ -30,11 +30,13 @@
 */
 
 :- module(pldoc_files,
-	  [ doc_save/2			% +File, +Options
+	  [ doc_save/2,			% +File, +Options
+	    doc_pack/1			% +Pack (re-export from doc_pack)
 	  ]).
 :- use_module(library(pldoc), []).
 :- use_module(pldoc(doc_html)).
 :- use_module(pldoc(doc_index)).
+:- use_module(pldoc(doc_pack)).
 :- use_module(library(option)).
 :- use_module(library(lists)).
 
@@ -46,10 +48,7 @@ in progress, providing search and guaranteed consistency with the loaded
 version. Creating stand-alone files as  provided   by  this  file can be
 useful for printing or distribution.
 
-@tbd	Check links
-@tbd	Nice frontend for common scenarios
-	- Generate documentation for a pack (README in top; files in Prolog)
-	- Default save into a doc subdirectory?
+@tbd	Generate a predicate index?
 */
 
 :- predicate_options(doc_save/2, 2,
@@ -57,9 +56,10 @@ useful for printing or distribution.
 		       doc_root(atom),
 		       man_server(atom),
 		       index_file(atom),
-		       if(onceof([loaded,true])),
+		       if(oneof([loaded,true])),
 		       recursive(boolean),
-		       css(oneof([copy,inline]))
+		       css(oneof([copy,inline])),
+		       title(atom)
 		     ]).
 
 
@@ -72,8 +72,13 @@ useful for printing or distribution.
 %
 %		* doc_root(+Dir)
 %		Save output to the given directory.  Default is to save
-%		the documentation files in the same directory as the
-%		sources.
+%		the documentation for a file in the same directory as
+%		the file and for a directory in a subdirectory =doc=.
+%
+%		* title(+Title)
+%		Title is an atom that provides the HTML title of the
+%		main (index) page.  Only meaningful when generating
+%		documentation for a directory.
 %
 %		* man_server(+RootURL)
 %		Root of a manual server used for references to built-in
@@ -96,7 +101,18 @@ useful for printing or distribution.
 %		Using =inline=, include the CSS file into the created
 %		files.  Currently, only the default =copy= is supported.
 %
-%	@tbd	Inline CSS files
+%	The typical use-case is to document the Prolog files that belong
+%	to a project in the  current  directory.   To  do  this load the
+%	Prolog  files  and  run  the   goal    below.   This  creates  a
+%	sub-directory  =doc=  with  an  index  file  =|index.html|=.  It
+%	replicates the directory structure  of   the  source  directory,
+%	creating an HTML file for each Prolog file and an index file for
+%	each sub-directory. A  copy  of  the   required  CSS  and  image
+%	resources is copied to the =doc= directory.
+%
+%	  ==
+%	  ?- doc_save(., [recursive(true)]).
+%	  ==
 
 doc_save(Spec, Options) :-
 	doc_target(Spec, Target, Options),
@@ -113,6 +129,7 @@ doc_save(Spec, Options) :-
 	    nb_delete(pldoc_options)),
 	copy_resources(Dir, Options2).
 
+
 %%	generate(+Spec, +Options) is det.
 %
 %	Generate  documentation  for  the    specification   created  by
@@ -128,19 +145,22 @@ generate(file(PlFile, DocFile), Options) :-
 	    open(DocFile, write, Out, [encoding(utf8)]),
 	    with_output_to(Out, doc_for_file(PlFile, Options)),
 	    close(Out)).
-generate(directory(Dir, IndexFile, Members), Options) :-
+generate(directory(Dir, IndexFile, Members, DirOptions), Options) :-
+	append(DirOptions, Options, AllOptions),
 	b_setval(pldoc_output, IndexFile),
 	setup_call_cleanup(
 	    open(IndexFile, write, Out, [encoding(utf8)]),
-	    with_output_to(Out, doc_for_dir(Dir,
-					    [ members(Members)
-					    | Options
-					    ])),
+	    with_output_to(
+		Out,
+		doc_for_dir(Dir,
+			    [ members(Members)
+			    | AllOptions
+			    ])),
 	    close(Out)),
 	generate(Members, Options).
 
 
-%%	doc_target(+Spec, -Target) is semidet.
+%%	doc_target(+Spec, -Target, +Options) is semidet.
 %
 %	Generate a structure describing what to document in what files.
 %	This structure is a term:
@@ -148,7 +168,7 @@ generate(directory(Dir, IndexFile, Members), Options) :-
 %		* file(PlFile, DocFile)
 %		Document PlFile in DocFile
 %
-%		* directory(Dir, IndexFile, Members)
+%		* directory(Dir, IndexFile, Members, Options)
 %		Document Dir in IndexFile.  Members is a list of
 %		documentation structures.
 
@@ -158,13 +178,25 @@ doc_target(FileOrDir, file(File, DocFile), Options) :-
 			     file_errors(fail),
 			     access(read)
 			   ]), !,
-	document_file(File, DocFile, Options).
-doc_target(FileOrDir, directory(Dir, Index, Members), Options) :-
+	(   option(source_root(_), Options)
+	->  Options1 = Options
+	;   file_directory_name(File, FileDir),
+	    Options1 = [source_root(FileDir)|Options]
+	),
+	document_file(File, DocFile, Options1).
+doc_target(FileOrDir, directory(Dir, Index, Members, DirOptions), Options0) :-
 	absolute_file_name(FileOrDir, Dir,
 			   [ file_type(directory),
 			     file_errors(fail),
 			     access(read)
 			   ]), !,
+	(   option(source_root(_), Options0)		% recursive
+	->  Options = Options0
+	;   Options1 = [source_root(Dir)|Options0],	% top
+	    exclude(main_option, Options1, Options2),
+	    set_doc_root(Dir, Options2, Options)
+	),
+	DirOptions = Options,
 	document_file(Dir, Index, Options),
 	findall(Member,
 		(   prolog_file_in_dir(Dir, File, Options),
@@ -172,10 +204,25 @@ doc_target(FileOrDir, directory(Dir, Index, Members), Options) :-
 		),
 		Members).
 
-target_directory(directory(_, Index, _), Dir) :-
+%%	main_option(?Option)
+%
+%	Options that apply only to the main directory.
+
+main_option(title(_)).
+main_option(readme(_)).
+main_option(todo(_)).
+
+target_directory(directory(_, Index, _, _), Dir) :-
 	file_directory_name(Index, Dir).
 target_directory(file(_, DocFile), Dir) :-
 	file_directory_name(DocFile, Dir).
+
+set_doc_root(_Dir, Options0, Options) :-
+	option(doc_root(_), Options0), !,
+	Options = Options0.
+set_doc_root(Dir, Options0, Options) :-
+	directory_file_path(Dir, doc, DocRoot),
+	Options = [doc_root(DocRoot)|Options0].
 
 %%	file_map(+DocStruct, -List)
 %
@@ -189,7 +236,7 @@ file_map([H|T]) -->
 	file_map(T).
 file_map(file(Src, Doc)) -->
 	[ file(Src, Doc) ].
-file_map(directory(_Dir, _Doc, Members)) -->
+file_map(directory(_Dir, _Doc, Members, _Options)) -->
 	file_map(Members).
 
 
@@ -220,8 +267,11 @@ document_file(File, DocFile, Options) :-
 	),
 	(   option(doc_root(Dir0), Options),
 	    ensure_slash(Dir0, Dir)
-	->  working_directory(PWD, PWD),
-	    atom_concat(PWD, Local, DocFile0),
+	->  (   option(source_root(SrcTop), Options)
+	    ->	true
+	    ;	working_directory(SrcTop, SrcTop)
+	    ),
+	    atom_concat(SrcTop, Local, DocFile0),
 	    atom_concat(Dir, Local, DocFile),
 	    file_directory_name(DocFile, DocDir),
 	    ensure_dir(DocDir, Options)
@@ -271,6 +321,7 @@ prolog_file_in_dir(Dir, File, Options) :-
 	->  source_file(File),
 	    file_directory_name(File, Dir)
 	;   user:prolog_file_type(Ext, prolog),
+	    \+ user:prolog_file_type(Ext, qlf),
 	    atomic_list_concat([Dir, '/*.', Ext], Pattern),
 	    expand_file_name(Pattern, Files),
 	    member(File, Files)
@@ -279,9 +330,11 @@ prolog_file_in_dir(Dir, File, Options) :-
 	\+ blocked(Base).
 prolog_file_in_dir(Dir, SubDir, Options) :-
 	option(recursive(true), Options, false),
+	option(doc_root(DocRoot), Options),
 	atom_concat(Dir, '/*', Pattern),
 	expand_file_name(Pattern, Matches),
 	member(SubDir, Matches),
+	SubDir \== DocRoot,
 	exists_directory(SubDir).
 
 %%	blocked(+File) is semidet.

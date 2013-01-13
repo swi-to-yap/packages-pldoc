@@ -1,6 +1,4 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@uva.nl
@@ -62,6 +60,7 @@
 :- use_module(pldoc(doc_wiki)).
 :- use_module(pldoc(doc_util)).
 :- use_module(pldoc(doc_access)).
+:- use_module(pldoc(doc_pack)).
 
 /** <module> Documentation server
 
@@ -130,13 +129,10 @@ doc_server(Port, Options) :-
 	merge_options(ServerOptions,
 		      [ port(Port),
 			timeout(60),
-			keep_alive_timeout(1),
-			local(4000),	% small stacks for now
-			global(4000),
-			trail(4000)
+			keep_alive_timeout(1)
 		      ], HTTPOptions),
 	http_server(http_dispatch, HTTPOptions),
-	assert(doc_server_port(Port)),
+	assertz(doc_server_port(Port)),
 	print_message(informational, pldoc(server_started(Port))).
 
 %%	doc_current_server(-Port) is det.
@@ -166,7 +162,9 @@ doc_current_server(Port) :-
 doc_browser :-
 	doc_browser([]).
 doc_browser(Spec) :-
-	doc_current_server(Port),
+	catch(doc_current_server(Port),
+	      error(existence_error(http_server, pldoc), _),
+	      doc_server(Port)),
 	browser_url(Spec, Request),
 	format(string(URL), 'http://localhost:~w~w', [Port, Request]),
 	www_open_url(URL).
@@ -216,7 +214,7 @@ prepare_editor.
 		[prefix, authentication(pldoc(read))]).
 :- http_handler(pldoc('index.html'), pldoc_index,   []).
 :- http_handler(pldoc(file),	   pldoc_file,	   []).
-:- http_handler(pldoc(directory),  pldoc_dir,	   []).
+:- http_handler(pldoc(place),	   go_place,	   []).
 :- http_handler(pldoc(edit),	   pldoc_edit,
 		[authentication(pldoc(edit))]).
 :- http_handler(pldoc(doc),	   pldoc_doc,	   [prefix]).
@@ -352,15 +350,20 @@ pldoc_edit(_Request) :-
 	throw(http_reply(forbidden(Location))).
 
 
-%%	pldoc_dir(+Request)
+%%	go_place(+Request)
 %
-%	Handler for /directory?dir=Dir, providing an index for
-%	Dir.  Mapped to /doc/Dir/index.html.
+%	HTTP handler to handle the places menu.
 
-pldoc_dir( Request) :-
+go_place(Request) :-
 	http_parameters(Request,
-			[ dir(Dir0, [])
+			[ place(Place, [])
 			]),
+	places(Place).
+
+places(':packs:') :- !,
+	http_link_to_id(pldoc_pack, [], HREF),
+	throw(http_reply(moved(HREF))).
+places(Dir0) :-
 	expand_alias(Dir0, Dir),
 	(   allowed_directory(Dir)
 	->  format(string(IndexFile), '~w/index.html', [Dir]),
@@ -475,6 +478,17 @@ documentation(File, Request) :-
 	edit_options(Request, Options),
 	doc_for_wiki_file(WikiFile, Options).
 documentation(Path, Request) :-
+	pl_file(Path, File),
+	(   allowed_file(File)
+	->  true
+	;   throw(http_reply(forbidden(File)))
+	),
+	doc_reply_file(File, Request).
+
+:- public
+	doc_reply_file/2.
+
+doc_reply_file(File, Request) :-
 	http_parameters(Request,
 			[ public_only(Public),
 			  reload(Reload),
@@ -482,11 +496,6 @@ documentation(Path, Request) :-
 			],
 			[ attribute_declarations(param)
 			]),
-	pl_file(Path, File),
-	(   allowed_file(File)
-	->  true
-	;   throw(http_reply(forbidden(File)))
-	),
         (   exists_file(File)
         ->  true
         ;   throw(http_reply(not_found(File)))
@@ -605,9 +614,8 @@ pldoc_man(Request) :-
 			  function(Fun, [optional(true)]),
 			  'CAPI'(F,     [optional(true)])
 			]),
-	format(string(Title), 'Manual -- ~w', [PI]),
 	(   ground(PI)
-	->  Obj = PI
+	->  split_pi(PI, Obj)
 	;   ground(Fun)
 	->  atomic_list_concat([Name,ArityAtom], /, Fun),
 	    atom_number(ArityAtom, Arity),
@@ -615,9 +623,36 @@ pldoc_man(Request) :-
 	;   ground(F)
 	->  Obj = c(F)
 	),
+	man_title(Obj, Title),
 	reply_html_page(pldoc(man),
 			title(Title),
 			\man_page(Obj, [])).
+
+man_title(f(Obj), Title) :-
+	format(atom(Title), 'SWI-Prolog -- function ~w', [Obj]).
+man_title(c(Obj), Title) :-
+	format(atom(Title), 'SWI-Prolog -- API-function ~w', [Obj]).
+man_title(Obj, Title) :-
+	format(atom(Title), 'SWI-Prolog -- ~w', [Obj]).
+
+split_pi(Atom, Module:PI) :-
+	atomic_list_concat([Module, PIAtom], :, Atom), !,
+	split_pi2(PIAtom, PI).
+split_pi(Atom, PI) :-
+	split_pi2(Atom, PI).
+
+split_pi2(Atom, Name//Arity) :-
+	sub_atom(Atom, B, _, A, //),
+	sub_atom(Atom, _, A, 0, ArityA),
+	atom_number(ArityA, Arity), !,
+	sub_atom(Atom, 0, B, _, Name).
+split_pi2(Atom, Name/Arity) :-
+	sub_atom(Atom, B, _, A, /),
+	sub_atom(Atom, _, A, 0, ArityA),
+	atom_number(ArityA, Arity), !,
+	sub_atom(Atom, 0, B, _, Name).
+
+
 
 %%	pldoc_object(+Request)
 %

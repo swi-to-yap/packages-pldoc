@@ -1,6 +1,4 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@vu.nl
@@ -47,11 +45,11 @@
 :- use_module(doc_wiki).
 :- use_module(doc_html).
 :- use_module(doc_search).
+:- use_module(doc_process).
 :- use_module(library(http/html_write)).
 :- use_module(library(http/html_head)).
 :- use_module(library(http/http_dispatch)).
 :- use_module(library(http/http_path)).
-:- use_module(library(doc_http)).
 :- include(hooks).
 
 /** <module> Process SWI-Prolog HTML manuals
@@ -536,21 +534,43 @@ man_page(Obj, Options) -->
 	  Matches = [Parent+Path-_|_]
 	},
 	html_requires(pldoc),
-	(   { option(links(true), Options, true) }
-	->  man_links(ParentPaths, Options),
-	    html(p([]))
-	;   []
-	),
+	man_links(ParentPaths, Options),
 	man_matches(Matches, Obj).
 man_page(Obj, Options) -->
-	{ \+ option(no_manual(fail), Options),
-	  term_to_atom(Obj, Atom)
+	{ full_object(Obj, Full),
+	  findall(Full-File,
+		  ( doc_comment(Full, File:_, _, _),
+		    \+ private(Full, Options)
+		  ),
+		  Pairs),
+	  Pairs \== [],
+	  pairs_keys(Pairs, Objs)
+	}, !,
+	html_requires(pldoc),
+	(   { Pairs = [_-File] }
+	->  object_page_header(File, Options)
+	;   object_page_header(-, Options)
+	),
+	objects(Objs, [synopsis(true)|Options]).
+man_page(Obj, Options) -->
+	{ \+ option(no_manual(fail), Options)
 	},
 	html_requires(pldoc),
-	(   { option(links(true), Options, true) }
-	->  man_links([], [])
-	;   html(p(['No manual entry for ', Atom]))
-	).
+	man_links([], Options),
+	html(p(class(noman),
+	       [ 'Sorry, No manual entry for ',
+		 b('~w'-[Obj])
+	       ])).
+
+full_object(M:N/A, M:N/A) :- !.
+full_object(M:N//A, M:N/A2) :-
+	integer(A2), !,
+	A2 is A+2.
+full_object(Name/Arity, _:Name/Arity) :- !.
+full_object(Name//Arity, _:Name/Arity2) :-
+	integer(Arity),
+	Arity2 is Arity+1.
+
 
 %%	man_synopsis(+Text, Parent)
 %
@@ -558,6 +578,9 @@ man_page(Obj, Options) -->
 %	The tricky part is that there   are cases where multiple modules
 %	export the same predicate. We must find   from  the title of the
 %	manual section which library is documented.
+
+:- public
+	man_synopsis//2.		% called from man_match//2
 
 man_synopsis(Text, Parent) -->
 	{ atom_pi(Text, PI) },
@@ -594,12 +617,13 @@ object_module(Section, Module) :-
 	    module_property(Module, file(PlFile))
 	).
 
-
 atom_pi(Text, Name/Arity) :-
 	atom(Text),
 	sub_atom(Text, Pre, _, Post, /),
 	sub_atom(Text, _, Post, 0, AA),
-	catch(atom_number(AA, Arity), _, fail), !,
+	atom_number(AA, Arity),
+	integer(Arity),
+	Arity >= 0, !,
 	sub_atom(Text, 0, Pre, _, Name).
 
 man_matches([], _) --> [].
@@ -643,6 +667,13 @@ dom_element(a, Att, Content, Path) -->
 	  rewrite_ref(Class, HREF, Path, Myref)
 	}, !,
 	html(a(href(Myref), \dom_list(Content, Path))).
+dom_element(span, Att, [CDATA], _) -->
+	{ memberchk(class='pred-ext', Att),
+	  atom_pi(CDATA, PI),
+	  documented(PI),
+	  http_link_to_id(pldoc_man, [predicate=CDATA], HREF)
+	},
+	html(a(href(HREF), CDATA)).
 dom_element(div, Att, _, _) -->
 	{ memberchk(class=navigate, Att) }, !.
 dom_element(html, _, Content, Path) --> !,	% do not emit a html for the second time
@@ -658,6 +689,17 @@ dom_element(Name, Attrs, Content, Path) -->
 	html_begin(Begin),
 	dom_list(Content, Path),
 	html_end(Name).
+
+%%	documented(+PI) is semidet.
+%
+%	True if we have documentation about PI
+
+documented(PI) :-
+	index_manual,
+	man_index(PI, _, _, _, _), !.
+documented(PI) :-
+	full_object(PI, Obj),
+	doc_comment(Obj, _, _, _), !.
 
 
 %%	rewrite_ref(+Class, +Ref0, +Path, -ManRef) is semidet.
@@ -743,11 +785,7 @@ rewrite_ref(flag, Ref0, Path, Ref) :-
 %	If Atom is `Name/Arity', decompose to Name and Arity. No errors.
 
 name_to_object(Atom, Object) :-
-	atom(Atom),
-	atomic_list_concat([Name, AA], /, Atom),
-	catch(atom_number(AA, Arity), _, fail),
-	integer(Arity),
-	Arity >= 0,
+	atom_pi(Atom, Name/Arity),
 	(   atom_concat('f-', FuncName, Name)
 	->  Object = f(FuncName/Arity)
 	;   Object = Name/Arity
@@ -776,11 +814,16 @@ referenced_section(Fragment, File, Path, section(Level, Nr, SecPath)) :-
 %	Create top link structure for manual pages.
 
 man_links(ParentPaths, Options) -->
-	html(div(class(navhdr),
-		 [ div(class(jump), \man_parent(ParentPaths)),
-		   div(class(search), \search_form(Options)),
-		   br(clear(right))
-		 ])).
+	{ option(links(true), Options, true) }, !,
+	html([ div(class(navhdr),
+		   [ div(class(jump), \man_parent(ParentPaths)),
+		     div(class(search), \search_form(Options)),
+		     br(clear(right))
+		   ]),
+	       p([])
+	     ]).
+man_links(_, _) -->
+	[].
 
 man_parent(ParentPaths) -->
 	{ maplist(parent_to_section, ParentPaths, [Section|MoreSections]),

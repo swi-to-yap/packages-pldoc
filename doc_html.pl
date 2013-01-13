@@ -45,6 +45,7 @@
 	    object_edit_button//2,	% +Obj, +Options, //
 	    object_source_button//2,	% +Obj, +Options, //
 	    doc_resources//1,		% +Options
+	    ensure_doc_objects/1,	% +File
 					% Support other backends
 	    doc_file_objects/5,		% +FSpec, -File, -Objs, -FileOpts, +Opts
 	    existing_linked_file/2,	% +FileSpec, -Path
@@ -66,6 +67,7 @@
 	    object_ref//2,		% +Object, +Options, //
 	    object_href/2,		% +Object, -URL
 	    object_page//2,		% +Object, +Options, //
+	    object_page_header//2,	% +File, +Options, //
 	    object_synopsis//2		% +Object, +Options, //
 	  ]).
 :- use_module(library(lists)).
@@ -144,6 +146,7 @@ extracting module doc_wiki.pl into HTML+CSS.
 		       header(boolean),
 		       links(boolean),
 		       no_manual(boolean),
+		       try_manual(boolean),
 		       search_in(oneof([all,app,man])),
 		       search_match(oneof([name,summary])),
 		       search_options(boolean)
@@ -251,7 +254,7 @@ prolog_file(FileSpec, Options) -->
 	       \file_header(File, FileOptions)
 	     | \objects(Objects, FileOptions)
 	     ]),
-	undocumented(Objects, FileOptions).
+	undocumented(File, Objects, FileOptions).
 
 %%	doc_resources(+Options)// is det.
 %
@@ -300,22 +303,48 @@ doc_file_objects(FileSpec, File, Objects, FileOptions, Options) :-
 	pairs_values(ByLine, Objs0),
 	module_info(File, ModuleOptions, Options),
 	file_info(Objs0, Objs1, FileOptions, ModuleOptions),
-	doc_hide_private(Objs1, Objects, ModuleOptions).
+	doc_hide_private(Objs1, ObjectsSelf, ModuleOptions),
+	include_reexported(ObjectsSelf, Objects, File, FileOptions).
+
+include_reexported(SelfObjects, Objects, File, Options) :-
+	option(include_reexported(true), Options),
+	option(module(Module), Options),
+	option(public(Exports), Options),
+	select_undocumented(Exports, Module, SelfObjects, Undoc),
+	re_exported_doc(Undoc, File, Module, REObjs, _),
+	REObjs \== [], !,
+	append(SelfObjects, REObjs, Objects).
+include_reexported(Objects, Objects, _, _).
+
 
 %%	ensure_doc_objects(+File)
 %
 %	Ensure we have documentation about  File.   If  the  file is not
-%	loaded, run the cross-referencer on it   to collect the comments
-%	and meta-information.
-%
-%	@tbd	We could also run the cross-referencer if the file
-%		was loaded, but before we are collecting comments.
-%		Is that useful?
+%	loaded or we have no comments for the file because it was loaded
+%	before comment collection was enabled,  run the cross-referencer
+%	on it to collect the comments and meta-information.
+
+:- dynamic
+	no_comments/2.
 
 ensure_doc_objects(File) :-
-	source_file(File), !.
+	source_file(File), !,
+	(   doc_file_has_comments(File)
+	->  true
+	;   no_comments(File, TimeChecked),
+	    time_file(File, TimeChecked)
+	->  true
+	;   xref_source(File),
+	    retractall(no_comments(File, _)),
+	    (	doc_file_has_comments(File)
+	    ->	true
+	    ;	time_file(File, TimeChecked),
+		assertz(no_comments(File, TimeChecked))
+	    )
+	).
 ensure_doc_objects(File) :-
-	xref_source(File).
+	xref_source(File), !.
+ensure_doc_objects(_).
 
 %%	module_info(+File, -ModuleOptions, +OtherOptions) is det.
 %
@@ -465,8 +494,10 @@ file_title(Title, File, Options) -->
 %	file is not loaded because we do  not want to load files through
 %	the documentation system.
 
-reload_button(File, _Base, _Options) -->
-	{ \+ source_file(File) }, !,
+reload_button(File, _Base, Options) -->
+	{ \+ source_file(File),
+	  \+ option(files(_), Options)
+	}, !,
 	html(span(class(file_anot), '[not loaded]')).
 reload_button(_File, Base, Options) -->
 	{ option(edit(true), Options), !,
@@ -648,25 +679,47 @@ pop_mode(Mode, [H|Rest0], Rest) -->
 	html_end(H),
 	pop_mode(Mode, Rest0, Rest).
 
-%%	undocumented(+Objects, +Options)// is det.
+%%	undocumented(+File, +Objects, +Options)// is det.
 %
 %	Describe undocumented predicates if the file is a module file.
 
-undocumented(Objs, Options) -->
+undocumented(File, Objs, Options) -->
 	{ memberchk(module(Module), Options),
 	  memberchk(public(Exports), Options),
 	  select_undocumented(Exports, Module, Objs, Undoc),
-	  Undoc \== []
+	  re_exported_doc(Undoc, File, Module, REObjs, ReallyUnDoc)
 	}, !,
-	html([ h2(class(undoc), 'Undocumented predicates'),
-	       p(['The following predicates are exported, but not ',
-		  'or incorrectly documented.'
-		 ]),
-	       dl(class(undoc),
-		  \undocumented_predicates(Undoc, Options))
-	     ]).
-undocumented(_, _) -->
+	re_exported_doc(REObjs, Options),
+	undocumented(ReallyUnDoc, Options).
+undocumented(_, _, _) -->
 	[].
+
+re_exported_doc([], _) --> !.
+re_exported_doc(Objs, Options) -->
+	reexport_header(Objs, Options),
+	objects(Objs, Options).
+
+reexport_header(_, Options) -->
+	{ option(reexport_header(true), Options, true)
+	}, !,
+	html([ h2(class(wiki), 'Re-exported predicates'),
+	       p([ 'The following predicates are re-exported from other ',
+		   'modules'
+		 ])
+	     ]).
+reexport_header(_, _) -->
+	[].
+
+undocumented([], _) --> !.
+undocumented(UnDoc, Options) -->
+	 html([ h2(class(undoc), 'Undocumented predicates'),
+		p(['The following predicates are exported, but not ',
+		   'or incorrectly documented.'
+		  ]),
+		dl(class(undoc),
+		   \undocumented_predicates(UnDoc, Options))
+	      ]).
+
 
 undocumented_predicates([], _) -->
 	[].
@@ -721,11 +774,29 @@ is_pi(_/_).
 is_pi(_//_).
 
 
+%%	re_exported_doc(+Undoc:list(pi), +File:atom, +Module:atom,
+%%			-ImportedDoc, -ReallyUnDoc:list(pi))
+
+re_exported_doc([], _, _, [], []).
+re_exported_doc([PI|T0], File, Module, [doc(Orig:PI,Pos,Comment)|ObjT], UnDoc) :-
+	pi_to_head(PI, Head),
+	(   predicate_property(Module:Head, imported_from(Orig))
+	->  true
+	;   xref_defined(File, Head, imported(File2)),
+	    ensure_doc_objects(File2),
+	    xref_module(File2, Orig)
+	),
+	doc_comment(Orig:PI, Pos, _, Comment), !,
+	re_exported_doc(T0, File, Module, ObjT, UnDoc).
+re_exported_doc([PI|T0], File, Module, REObj, [PI|UnDoc]) :-
+	re_exported_doc(T0, File, Module, REObj, UnDoc).
+
+
 		 /*******************************
 		 *	SINGLE OBJECT PAGE	*
 		 *******************************/
 
-%%	object_page(+Obj, +Options)// is det.
+%%	object_page(+Obj, +Options)// is semidet.
 %
 %	Generate an HTML page describing Obj.  The top presents the file
 %	the object is documented in and a search-form.  Options:
@@ -755,16 +826,20 @@ object_page(Obj, Options) -->
 object_page_header(File, Options) -->
 	{ option(header(true), Options, true) }, !,
 	html(div(class(navhdr),
-		 [ \file_link(File),
+		 [ div(class(jump), \file_link(File)),
 		   div(class(search), \search_form(Options)),
 		   br(clear(right))
 		 ])).
 object_page_header(_, _) --> [].
 
-file_link(-) --> !.
+file_link(-) --> !,
+	places_menu(-).
 file_link(File) -->
-	html(div(class(jump),
-		 a(href(location_by_id(pldoc_doc)+File), File))).
+	{ file_directory_name(File, Dir)
+	},
+	places_menu(Dir),
+	html([ div(a(href(location_by_id(pldoc_doc)+File), File))
+	     ]).
 
 
 %%	object_synopsis(Obj, Options) is det.
@@ -1326,9 +1401,16 @@ predref(Term) -->
 
 predref(Obj, Options) -->
 	{ Obj = _:_,
-	  doc_comment(Obj, _, _, _)
+	  doc_comment(Obj, File:_Line, _, _),
+	  (   (   option(files(Map), Options)
+	      ->  memberchk(file(File,_), Map)
+	      ;   true
+	      )
+	  ->  object_href(Obj, HREF, Options)
+	  ;   manref(Obj, HREF, Options)
+	  )
 	}, !,
-	object_ref(Obj, [qualify(true)|Options]).
+	html(a(href(HREF), \object_link(Obj, [qualify(true)|Options]))).
 predref(M:Term, Options) --> !,
 	predref(Term, M, Options).
 predref(Term, Options) -->
@@ -1346,31 +1428,48 @@ predref(Name/Arity, _, Options) -->		% From packages
 	},
 	html(a([class=Category, href=HREF], [Name, /, Arity])).
 predref(Obj, Module, Options) -->		% Local
-	{ doc_comment(Module:Obj, _, _, _)
+	{ doc_comment(Module:Obj, File:_Line, _, _),
+	  (   option(files(Map), Options)
+	  ->  memberchk(file(File,_), Map)
+	  ;   true
+	  )
 	}, !,
 	object_ref(Module:Obj, Options).
-predref(Name/Arity, Module, _Options) -->
-	{ pred_href(Name/Arity, Module, HREF) }, !,
+predref(Name/Arity, Module, Options) -->
+	{ \+ option(files(_), Options),
+	  pred_href(Name/Arity, Module, HREF)
+	}, !,
 	html(a(href=HREF, [Name, /, Arity])).
-predref(Name//Arity, Module, _Options) -->
-	{ PredArity is Arity + 2,
+predref(Name//Arity, Module, Options) -->
+	{ \+ option(files(_), Options),
+	  PredArity is Arity + 2,
 	  pred_href(Name/PredArity, Module, HREF)
 	}, !,
 	html(a(href=HREF, [Name, //, Arity])).
-predref(Name/Arity, _, Options) -->		% From packages
-	{ prolog:doc_object_summary(Name/Arity, Category, _, _), !,
-	  manref(Name/Arity, HREF, Options)
+predref(PI, _, Options) -->		% From packages
+	{ canonical_pi(PI, CPI, HTML),
+	  (   option(files(_), Options)
+	  ->  Category = extmanual
+	  ;   prolog:doc_object_summary(CPI, Category, _, _)
+	  ),
+	  manref(CPI, HREF, Options)
 	},
-	html(a([class=Category, href=HREF], [Name, /, Arity])).
-predref(Name/Arity, _, _Options) --> !,
-	html(span(class=undef, [Name, /, Arity])).
-predref(Name//Arity, _, _Options) --> !,
-	html(span(class=undef, [Name, //, Arity])).
+	html(a([class=Category, href=HREF], HTML)).
+predref(PI, _, _Options) -->
+	{ canonical_pi(PI, _CPI, HTML)
+	}, !,
+	html(span(class=undef, HTML)).
 predref(Callable, Module, Options) -->
 	{ callable(Callable),
 	  functor(Callable, Name, Arity)
 	},
 	predref(Name/Arity, Module, Options).
+
+canonical_pi(Name/Arity, Name/Arity, [Name, /, Arity]) :-
+	atom(Name), integer(Arity), !.
+canonical_pi(Name//Arity, Name/Arity2, [Name, //, Arity]) :-
+	atom(Name), integer(Arity), !,
+	Arity2 is Arity+2.
 
 
 %%	manref(+NameArity, -HREF, +Options) is det.
@@ -1378,8 +1477,8 @@ predref(Callable, Module, Options) -->
 %	Create reference to a manual page.  When generating files, this
 %	listens to the option man_server(+Server).
 
-manref(Name/Arity, HREF, Options) :-
-	format(string(FragmentId), '~w/~d', [Name, Arity]),
+manref(PI, HREF, Options) :-
+	predname(PI, PredName),
 	(   option(files(_Map), Options)
 	->  option(man_server(Server), Options,
 		   'http://www.swi-prolog.org/pldoc'),
@@ -1387,11 +1486,16 @@ manref(Name/Arity, HREF, Options) :-
 	    uri_data(path, Comp0, Path0),
 	    directory_file_path(Path0, man, Path),
 	    uri_data(path, Comp0, Path, Components),
-	    uri_query_components(Query, [predicate=FragmentId]),
+	    uri_query_components(Query, [predicate=PredName]),
 	    uri_data(search, Components, Query),
 	    uri_components(HREF, Components)
-	;   http_link_to_id(pldoc_man, [predicate=FragmentId], HREF)
+	;   http_link_to_id(pldoc_man, [predicate=PredName], HREF)
 	).
+
+predname(Name/Arity, PredName) :- !,
+	format(atom(PredName), '~w/~d', [Name, Arity]).
+predname(Module:Name/Arity, PredName) :- !,
+	format(atom(PredName), '~w:~w/~d', [Module, Name, Arity]).
 
 
 %%	pred_href(+NameArity, +Module, -HREF) is semidet.
@@ -1483,7 +1587,10 @@ object_href(Obj, HREF) :-
 
 object_href(M:PI0, HREF, Options) :-
 	option(files(Map), Options),
-	module_property(M, file(File)),
+	(   module_property(M, file(File))
+	->  true
+	;   xref_module(File, M)
+	),
 	memberchk(file(File, DocFile), Map), !,
 	file_base_name(DocFile, LocalFile),	% TBD: proper directory index
 	expand_pi(PI0, PI),

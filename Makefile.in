@@ -51,9 +51,11 @@ check::
 # Documentation
 ################################################################
 
-TEXEXTRA=	latex.tex
-$(TEX):		$(TEXEXTRA) 
+TEXEXTRA=latex.tex docfiles.tex
+$(TEX):		$(TEXEXTRA)
 
+docfiles.tex:	doc_files.pl doc_pack.pl
+		$(PLTOTEX) --subsection 'library(doc_files)'
 
 
 ################################################################

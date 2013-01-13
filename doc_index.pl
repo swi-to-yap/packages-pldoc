@@ -30,11 +30,12 @@
 
 :- module(pldoc_index,
 	  [ doc_for_dir/2,		% +Dir, +Options
-	    dir_index/4,		% +Dir, +Options, //
-	    object_summaries/5,		% +Objs, +Section, +Options, //
-	    file_index_header/4,	% +File, +Options, //
-	    doc_links/4,		% +Directory, +Options, //
-	    doc_file_href/2,		% +File, -/doc/...
+	    dir_index//2,		% +Dir, +Options, //
+	    object_summaries//3,	% +Objs, +Section, +Options, //
+	    file_index_header//2,	% +File, +Options, //
+	    doc_links//2,		% +Directory, +Options, //
+	    doc_file_href/2,		% +File, -HREF
+	    places_menu//1,		% +Dir, //
 	    source_directory/1		% ?Directory
 	  ]).
 :- use_module(doc_process).
@@ -48,6 +49,7 @@
 :- use_module(library(readutil)).
 :- use_module(library(url)).
 :- use_module(library(option)).
+:- use_module(library(lists)).
 :- use_module(library(doc_http)).
 :- include(hooks).
 
@@ -60,6 +62,9 @@
 		       files(list),
 		       members(list),
 		       qualify(boolean),
+		       title(atom),
+		       if(oneof([true,loaded])),
+		       recursive(boolean),
 		       secref_style(oneof([number, title, number_title])),
 		       pass_to(doc_links/4, 2)
 		     ]).
@@ -98,10 +103,13 @@ doc_for_dir(DirSpec, Options) :-
 			     access(read)
 			   ],
 			   Dir),
-	file_base_name(Dir, Base),
+	(   option(title(Title), Options)
+	->  true
+	;   file_base_name(Dir, Title)
+	),
 	doc_write_page(
 	    pldoc(dir_index),
-	    title(Base),
+	    title(Title),
 	    \dir_index(Dir, Options),
 	    Options).
 
@@ -122,10 +130,13 @@ doc_write_page(Style, Head, Body, _) :-
 %
 %	  * members(+Members)
 %	  Documented members.  See doc_files.pl
+%	  * title(+Title)
+%	  Title to use for the index page
 
 dir_index(Dir, Options) -->
 	{ dir_source_files(Dir, Files0, Options),
 	  sort(Files0, Files),
+	  maplist(ensure_doc_objects, Files),
 	  directory_file_path(Dir, 'index.html', File),
 	  b_setval(pldoc_file, File)	% for predref
 	},
@@ -133,6 +144,7 @@ dir_index(Dir, Options) -->
 	       \doc_links(Dir, Options),
 	       \dir_header(Dir, Options),
 	       \subdir_links(Dir, Options),
+	       h2(class([wiki,plfiles]), 'Prolog files'),
 	       table(class(summary),
 		     \file_indices(Files, [directory(Dir)|Options])),
 	       \dir_footer(Dir, Options)
@@ -145,16 +157,8 @@ dir_index(Dir, Options) -->
 dir_source_files(_, Files, Options) :-
 	option(members(Members), Options), !,
 	findall(F, member(file(F,_Doc), Members), Files).
-dir_source_files(DirSpec, Files, _Options) :-
-	absolute_file_name(DirSpec, Dir,
-			   [ file_type(directory),
-			     access(read)
-			   ]),
-	findall(F, source_file_in_dir(Dir, F), Files).
-
-source_file_in_dir(Dir, File) :-
-	source_file(File),
-	file_directory_name(File, Dir).
+dir_source_files(Dir, Files, Options) :-
+	directory_source_files(Dir, Files, Options).
 
 %%	subdir_links(+Dir, +Options)// is det.
 %
@@ -162,11 +166,13 @@ source_file_in_dir(Dir, File) :-
 
 subdir_links(Dir, Options) -->
 	{ option(members(Members), Options),
-	  findall(SubDir, member(directory(SubDir, _, _), Members), SubDirs),
+	  findall(SubDir, member(directory(SubDir, _, _, _), Members), SubDirs),
 	  SubDirs \== []
 	},
-	html(table(class(subdirs),
-		   \subdir_link_rows(SubDirs, Dir))).
+	html([ h2(class([wiki,subdirs]), 'Sub directories'),
+	       table(class(subdirs),
+		     \subdir_link_rows(SubDirs, Dir))
+	     ]).
 subdir_links(_, _) --> [].
 
 subdir_link_rows([], _) --> [].
@@ -179,50 +185,67 @@ subdir_link_row(Dir, From) -->
 	  relative_file_name(Index, From, Link),
 	  file_base_name(Dir, Base)
 	},
-	html(tr(td(a(href(Link), Base)))).
+	html(tr(td(a([class(subdir), href(Link)], ['[dir] ', Base])))).
 
 %%	dir_header(+Dir, +Options)// is det.
 %
-%	Create header for directory
+%	Create header for directory.  Options:
+%
+%	  * readme(File)
+%	  Include File as introduction to the directory header.
 
-dir_header(Dir, _Options) -->
-	wiki_file(Dir, readme), !.
-dir_header(Dir, _Options) -->
-	{ file_base_name(Dir, Base)
+dir_header(Dir, Options) -->
+	wiki_file(Dir, readme, Options), !.
+dir_header(Dir, Options) -->
+	{ (   option(title(Title), Options)
+	  ->  true
+	  ;   file_base_name(Dir, Title)
+	  )
 	},
-	html(h1(class=dir, Base)).
+	html(h1(class=dir, Title)).
 
 %%	dir_footer(+Dir, +Options)// is det.
 %
 %	Create footer for directory. The footer contains the =TODO= file
-%	if provided.
+%	if provided.  Options:
+%
+%	  * todo(File)
+%	  Include File as TODO file in the footer.
 
-dir_footer(Dir, _Options) -->
-	wiki_file(Dir, todo), !.
+dir_footer(Dir, Options) -->
+	wiki_file(Dir, todo, Options), !.
 dir_footer(_, _) -->
 	[].
 
-%%	wiki_file(+Dir, +Type)// is semidet.
+%%	wiki_file(+Dir, +Type, +Options)// is semidet.
 %
 %	Include text from a Wiki text-file.
 
-wiki_file(Dir, Type) -->
-	{ wiki_file_type(Type, Base),
-	  atomic_list_concat([Dir, /, Base], File),
-	  access_file(File, read), !,
-	  read_file_to_codes(File, String, []),
+wiki_file(Dir, Type, Options) -->
+	{ (   Opt =.. [Type,WikiFile],
+	      option(Opt, Options)
+	  ->  true
+	  ;   directory_files(Dir, Files),
+	      member(File, Files),
+	      wiki_file_type(Type, Pattern),
+	      downcase_atom(File, Pattern),
+	      directory_file_path(Dir, File, WikiFile)
+	  ),
+	  access_file(WikiFile, read), !,
+	  read_file_to_codes(WikiFile, String, []),
 	  wiki_codes_to_dom(String, [], DOM)
 	},
 	pldoc_html:html(DOM).
 
 %%	wiki_file_type(+Category, -File) is nondet.
+%
+%	Declare file pattern names that are included for README and TODO
+%	for a directory. Files are matched case-insensitively.
 
-wiki_file_type(readme, 'README').
-wiki_file_type(readme, 'README.TXT').
-wiki_file_type(readme, 'README.txt').
-wiki_file_type(todo,   'TODO').
-wiki_file_type(todo,   'TODO.TXT').
-wiki_file_type(todo,   'TODO.txt').
+wiki_file_type(readme, 'readme').
+wiki_file_type(readme, 'readme.txt').
+wiki_file_type(todo,   'todo').
+wiki_file_type(todo,   'todo.txt').
 
 %%	file_indices(+Files, +Options)// is det.
 %
@@ -258,7 +281,11 @@ file_index(File, Options) -->
 file_index_header(File, Options) -->
 	prolog:doc_file_index_header(File, Options), !.
 file_index_header(File, Options) -->
-	{ file_base_name(File, Label),
+	{ (   option(directory(Dir), Options),
+	      directory_file_path(Dir, Label, File)
+	  ->  true
+	  ;   file_base_name(File, Label)
+	  ),
 	  doc_file_href(File, HREF, Options)
 	},
 	html(tr(th([colspan(3), class(file)],
@@ -271,7 +298,9 @@ file_index_header(File, Options) -->
 		   ]))).
 
 file_module_title(File) -->
-	{ module_property(M, file(File)),
+	{ (   module_property(M, file(File))
+	  ;   xref_module(File, M)
+	  ),
 	  doc_comment(M:module(Title), _, _, _)
 	}, !,
 	html([&(nbsp), ' -- ', Title]).
@@ -445,12 +474,16 @@ places_menu(Dir) -->
 	{ findall(D, source_directory(D), List),
 	  sort(List, Dirs)
 	},
-	html(form([ action(location_by_id(pldoc_dir))
+	html(form([ action(location_by_id(go_place))
 		  ],
 		  [ input([type(submit), value('Go')]),
-		    select(name(dir),
-			   \source_dirs(Dirs, Dir))
+		    select(name(place),
+			   \packs_source_dirs(Dirs, Dir))
 		  ])).
+
+packs_source_dirs(Dirs, Dir) -->
+	packs_link,
+	source_dirs(Dirs, Dir).
 
 source_dirs([], _) -->
 	[].
@@ -465,6 +498,19 @@ source_dirs([H|T], WD) -->
 	},
 	html(option([onClick(Call)|Attrs], H)),
 	source_dirs(T, WD).
+
+packs_link -->
+	{ pack_property(_,_), !,
+	  http_link_to_id(pldoc_pack, [], HREF),
+	  format(atom(Call), 'document.location=\'~w\';', [HREF])
+	},
+	html(option([ class(packs),
+		      onClick(Call),
+		      value(':packs:')
+		    ],
+		    'List extension packs')).
+packs_link -->
+	[].
 
 %%	source_directory(+Dir) is semidet.
 %%	source_directory(-Dir) is nondet.
