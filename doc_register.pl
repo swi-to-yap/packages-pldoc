@@ -1,11 +1,10 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
-    E-mail:        wielemak@science.uva.nl
+    E-mail:        J.Wielemaker@vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 1985-2006, University of Amsterdam
+    Copyright (C): 2006-2013, University of Amsterdam
+			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
     modify it under the terms of the GNU General Public License
@@ -96,11 +95,7 @@ process_stored_comments :-
 
 delayed_process(Comments, TermPos, File) :-
 	module_property(Module, file(File)),
-	'$set_source_module'(Old, Module),
-	process_comments(Comments, TermPos, File),
-	'$set_source_module'(_, Old).
-
-:- if(\+current_predicate('$push_input_context'/1)).
-'$push_input_context'(_) :-
-	'$push_input_context'.
-:- endif.
+	setup_call_cleanup(
+	    '$set_source_module'(Old, Module),
+	    process_comments(Comments, TermPos, File),
+	    '$set_source_module'(_, Old)).
