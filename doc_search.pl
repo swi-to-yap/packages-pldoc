@@ -31,7 +31,8 @@
 
 :- module(pldoc_search,
 	  [ search_form/3,		% +Options, //
-	    search_reply/4		% +Search, +Options, //
+	    search_reply/4,		% +Search, +Options, //
+	    matching_object_table//2	% +Objects, +Options, //
 	  ]).
 :- use_module(library(http/html_write)).
 :- use_module(library(http/html_head)).
@@ -42,7 +43,6 @@
 :- use_module(doc_process).
 :- use_module(doc_html).
 :- use_module(doc_index).
-:- use_module(library(doc_http)).
 :- include(hooks).
 
 /** <module> Search form and reply
@@ -81,14 +81,13 @@ search_form(Options) -->
 	  option(search_in(In), Options, all),
 	  option(search_match(Match), Options, summary)
 	},
-	html(form(action(location_by_id(pldoc_search)),
+	html(form([ id('search-form'),
+		    action(location_by_id(pldoc_search))
+		  ],
 		  [ div([ \search_field([ name(for),
-					  size(36)
+					  id(for)
 					| Extra
-					]),
-			  input([ type(submit),
-				  value('Search')
-				])
+					])
 			]),
 		    \search_options(In, Match, Options)
 		  ])).
@@ -124,7 +123,12 @@ search_options(In, Match, _Options) -->
 search_field(Options) -->
 	prolog:doc_search_field(Options), !.
 search_field(Options) -->
-	html(input(Options, [])).
+	html([ input(Options, []),
+	       input([ id('submit-for'),
+		       type(submit),
+		       value('Search')
+		     ])
+	     ]).
 
 radio(Radio, Field, Label, In) -->
 	{   Field == In
@@ -159,25 +163,65 @@ hidden(Name, Value) -->
 %		=summary=
 
 search_reply(For, Options) -->
+	{ var(For) }, !,
+	html([ \html_requires(pldoc),
+	       \doc_links('', [for('')|Options]),
+	       h1(class(wiki), 'Using PlDoc search'),
+	       ul([ li([ 'If you pause typing, the search box will display ',
+			 'an auto completion list.  Selecting an object jumps ',
+			 'immediately to the corresponding documentation.'
+		       ]),
+		    li([ 'Searching for ', i('Name/Arity'), i('Name//Arity'),
+			 i('Name'), ' or ', i('C-function'), ' ensures that ',
+			 'matching definitions appear first in the search ',
+			 'results'
+		       ]),
+		    li([ 'Other searches search through the name and summary ',
+			 'descriptions in the manual.'
+		       ])
+		  ])
+	     ]).
+search_reply(For, Options) -->
 	{ search_doc(For, PerCategory, Options),
 	  PerCategory \== [],
-	  option(resultFormat(Format), Options, summary),
-	  count_matches(PerCategory, Matches)
+	  option(resultFormat(Format), Options, summary)
 	}, !,
 	html([ \html_requires(pldoc),
 	       \doc_links('', [for(For)|Options]),
-	       div(class('search-results'),
-		   ['Search results for ', span(class(for), ['"', For, '"'])]),
-	       div(class('search-counts'),
-		   [ Matches, ' matches; ',
-		     \count_by_category(PerCategory)
-		   ])
-	     | \matches(Format, PerCategory, Options)
+	       h1(class(wiki),
+		  ['Search results for ', span(class(for), ['"', For, '"'])]),
+	       \indexed_matches(Format, PerCategory, Options)
 	     ]).
 search_reply(For, Options) -->
 	html([ \html_requires(pldoc),
 	       \doc_links('', [for(For)|Options]),
-	       h1(class(search), 'No matches')
+	       h1(class(wiki), 'No matches')
+	     ]).
+
+%%	matching_object_table(+Objects, +Options)// is det.
+%
+%	Show a list of matching objects,   similar  to a result-set from
+%	search.
+
+matching_object_table(Objects, Options) -->
+	{ maplist(obj_cat_sec, Objects, Pairs),
+	  group_hits(Pairs, Organized),
+	  option(format(Format), Options, summary)
+	},
+	indexed_matches(Format, Organized, Options).
+
+obj_cat_sec(Object, Cat-(Section-Object)) :-
+	prolog:doc_object_summary(Object, Cat, Section, _Summary).
+
+
+indexed_matches(Format, PerCategory, Options) -->
+	{ count_matches(PerCategory, Matches)
+	},
+	html([ div(class('search-counts'),
+		   [ Matches, ' matches; ',
+		     \count_by_category(PerCategory)
+		   ])
+	     | \matches(Format, PerCategory, Options)
 	     ]).
 
 count_by_category([]) -->
@@ -268,11 +312,14 @@ category_title(Category) -->
 %%	search_doc(+SearchString, -PerType:list, +Options) is det.
 %
 %	Return matches of SearchString  as   Type-PerFile  tuples, where
-%	PerFile is a list Fule-ListOfObjects.
+%	PerFile is a list File-ListOfObjects.
 
 search_doc(Search, PerType, Options) :-
 	findall(Tuples, matching_object(Search, Tuples, Options), Tuples0),
-	keysort(Tuples0, Tuples),
+	sort(Tuples0, Tuples),
+	group_hits(Tuples, PerType).
+
+group_hits(Tuples, PerType) :-
 	group_pairs_by_key(Tuples, PerCat0),
 	key_sort_order(PerCat0, PerCat1),
 	keysort(PerCat1, PerCat2),
@@ -315,12 +362,19 @@ matching_object(Search, Type-(Section-Obj), Options) :-
 	prolog:doc_object_summary(Obj, Type, Section, _),
 	matching_category(In, Type).
 matching_object(Search, Type-(Section-Obj), Options) :-
-	catch(atom_to_term(Search, Obj, _), _, fail),
+	(   atom_codes(Search, Codes),
+	    phrase(predicate_spec(Obj), Codes)
+	;   (   current_predicate(Search, _:_)
+	    ->  Obj = (Search/_)
+	    )
+	;   catch(atom_to_term(Search, Obj, _), _, fail)
+	),
 	nonvar(Obj),
 	option(search_in(In), Options, all),
 	prolog:doc_object_summary(Obj, Type, Section, _),
 	matching_category(In, Type).
 matching_object(Search, Match, Options) :-
+	atom_length(Search, Len), Len > 1,
 	atom_codes(Search, Codes),
 	phrase(search_spec(For0), Codes),
 	(   For0 = not(_)
@@ -328,6 +382,16 @@ matching_object(Search, Match, Options) :-
 	;   optimise_search(For0, For),
 	    exec_search(For, Match, Options)
 	).
+
+predicate_spec(Name/Arity) -->
+	string(NameCodes),
+	"/",
+	(   "/"
+	->  integer(DCGArity),
+	    {Arity is DCGArity+2}
+	;   integer(Arity)
+	), eos, !,
+	{ atom_codes(Name, NameCodes) }.
 
 %%	optimise_search(+Spec, -Optimised)
 %
@@ -404,7 +468,7 @@ prim_search_spec(Spec) -->
 	{   Codes = [0'-|Rest]		% '
 	->  atom_codes(Word, Rest),
 	    Spec = not(Word)
-	;   Codes \== "",
+	;   Codes \== [],
 	    atom_codes(Spec, Codes)
 	}.
 
@@ -420,6 +484,7 @@ prim_search_spec(Spec) -->
 %	@param Section  Reference to the context of Object.
 
 prolog:doc_object_summary(Obj, Category, File, Summary) :-
+	once(prolog_object(Obj)),
 	current_prolog_flag(home, SWI),
 	doc_comment(Obj0, File:_Line, Summary, _Comment),
 	(   is_list(Obj0)
@@ -431,6 +496,13 @@ prolog:doc_object_summary(Obj, Category, File, Summary) :-
 	->  Category = library
 	;   Category = application
 	).
+
+prolog_object(Var) :- var(Var), !.
+prolog_object(_/_).
+prolog_object(_//_).
+prolog_object(_:_/_).
+prolog_object(_:_//_).
+prolog_object(module(_)).
 
 
 %%	doc_category(Name, SortOrder, Description) is nondet.
@@ -453,10 +525,6 @@ prolog:doc_category(library,     80, 'System Libraries').
 %
 %	True if Needle can be found   as a case-insensitive substring in
 %	Haystick.
-%
-%	@tbd	Use public predicates for that.
 
 apropos_match(Needle, Haystack) :-
-	'$apropos_match'(Needle, Haystack).
-
-eos([], []).
+	sub_atom_icasechk(Haystack, _, Needle).

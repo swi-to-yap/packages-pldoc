@@ -15,7 +15,8 @@
 
 \begin{document}
 
-\title{SWI-Prolog Source Documentation}
+\title{SWI-Prolog Source Documentation \\
+       Version 2}
 \author{Jan Wielemaker \\
 	VU University, Amsterdam \\
 	The Netherlands \\
@@ -34,6 +35,13 @@ as a web-server for the loaded project during program development.
 The SWI-Prolog website (\url{http:www.swi-prolog.org}) is written in
 Prolog and integrates PlDoc to provide a comprehensive searchable
 \url[online manual]{http://www.swi-prolog.org/pldoc/index.html}.
+
+Version~2 of PlDoc extends the syntax with
+\url[Markdown]{http://en.wikipedia.org/wiki/Markdown} markup as
+specified by \url[Docygen]{http://www.stack.nl/~dimitri/doxygen/}.
+Based on experience with version~1, PlDoc~2 both tightens some rules
+to avoid misinterpretations and relaxes others that were considered
+too conservative.
 \end{abstract}
 
 \pagebreak
@@ -45,6 +53,7 @@ Prolog and integrates PlDoc to provide a comprehensive searchable
 \newpage
 
 \section{Introduction}
+\label{sec:pldoc-intro}
 
 When developing Prolog source that has to be maintained for a longer
 period or is developed by a ---possibly distributed--- team some basic
@@ -71,6 +80,7 @@ In \secref{motivation} we motivate our main choices.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Overview}
+\label{sec:pldoc-overview}
 
 Like JavaDoc, the PlDoc infrastructure is based on \emph{structured
 comments}.  Using comments, no changes have to be made to Prolog to
@@ -94,13 +104,14 @@ a web-server that can be used to browse the documentation.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Structured comments}
+\label{sec:pldoc-comments}
 
 Structured comments come in two flavours, the line-comment (\%) based
 one, seen mostly in the Prolog community and the block-comment
 (\verb$/*$\ldots\verb$*/$) based one, commonly seen in the Java and C
-domain.  As we cannot determine the argument-names, type and modes
-from following (predicate) code itself, we must supply this in the
-comment.\footnote{See \secref{motivation:modes}.}.  The overall
+domains.  As we cannot determine the argument names, type and modes
+from following (predicate) source itself, we must supply this in the
+comment.\footnote{See \secref{motivation:modes}.}  The overall
 structure of the comment therefore is:
 
 \begin{shortlist}
@@ -109,15 +120,22 @@ structure of the comment therefore is:
     \item JavaDoc style tags (\chr{@}keyword value, see \secref{tags})
 \end{shortlist}
 
-Using the \verb$/*$\ldots\verb$*/$ style comment, the type and mode
-declarations start at the first non-blank line and are ended by a blank
-line. Using \chr{\%} line-comments, the declaration is ended by the
-first line that starts with a single \%. E.g., the following two
-fragments are identical wrt. PlDoc. Skipping blank-lines in \verb$/**$
-comments allows to start the comment on the second line.
+The \verb$/*$\ldots\verb$*/$ style comment starts with
+\verb$/**$<white>. The type and mode declarations start at the first
+non-blank line and are ended by a blank line.
+
+The \chr{\%}-style line comments start with \verb$%!$<white> or, for
+compatibility reasons, with \verb$%%$<white>.\footnote{The \texttt{\%\%}
+leader was considered to give too many false positives on arbitrary
+source code. It is still accepted, but invalid comments are silently
+ignored, while invalid comments that start with \texttt{\%!} result in a
+warning.} The type and mode declaration is ended by the first line that
+starts with a single \%. E.g., the following two fragments are identical
+wrt. PlDoc. Skipping blank-lines in \verb$/**$ comments allows to start
+the comment on the second line.
 
 \begin{code}
-%%	predicate(-Arg:type) is nondet
+%!	predicate(-Arg:type) is nondet
 %	Predicate ...
 \end{code}
 
@@ -180,6 +198,7 @@ informally described below:
 		\ora <head>['//'] \\
 <determinism>	\isa 'det' \\
 		\ora 'semidet' \\
+		\ora 'failure' \\
 		\ora 'nondet' \\
 		\ora 'multi' \\
 <head>		\isa <functor>'('<argspec> {',' <argspec>}')' \\
@@ -192,22 +211,33 @@ informally described below:
 \end{tabular}
 \end{center}
 
-The \jargon{determinism} values originate from Mercury. Predicates
-marked as \const{det} must succeed exactly once and not leave any
-choice-points. The \const{semidet} indicator is used for predicates that
-either fail or succeed deterministically. The \const{nondet} indicator
-is the most general one and implies no constraints on the number of
-times the predicate succeeds and whether or not it leaves choice-points
-on the last success. Finally, \const{multi} is as \const{nondet}, but
-demands the predicate to succeed at least one time. Informally,
-\const{det} is used for deterministic transformations (e.g.\
-arithmetic), \const{semidet} for tests, \const{nondet} and
-\const{multi} for \jargon{generators}.
+The \jargon{determinism} values originate from Mercury. Their meaning is
+explained in the table below. Informally, \const{det} is used for
+deterministic transformations (e.g.\ arithmetic), \const{semidet} for
+tests, \const{nondet} and \const{multi} for \jargon{generators}.  The
+\const{failure} indicator is rarely used.  It mostly appears in hooks
+or the recovery goal of catch/3.
+
+\begin{center}
+\begin{tabular}{l|p{0.7\linewidth}}
+\hline
+\bf Determinism & \bf Predicate behaviour \\
+\hline
+\const{det}     & Succeeds exactly once without a choice point \\
+\const{semidet} & Fails or Succeeds exactly once without a choice-point \\
+\const{failure} & Always fails \\
+\const{nondet}  & No constraints on the number of times the predicate
+		  succeeds and whether or not it leaves choice-points
+		  on the last success. \\
+\const{multi}   & As \const{nondet}, but succeeds at least one time. \\
+\hline
+\end{tabular}
+\end{center}
 
 Instantiation patterns are:
 
 \begin{center}
-\begin{tabular}{lp{0.7\linewidth}}
+\begin{tabular}{l|p{0.7\linewidth}}
 \hline
 + &	Argument must be fully instantiated to a term that satisfies the
 	type. \\
@@ -230,30 +260,33 @@ system that allows for runtime verification and static type analysis
 
 \subsection*{Examples}
 
-\begin{verbatim}
-%%	length(+List:list, -Length:int) is det.
-%%	length(?List:list, -Length:int) is nondet.
-%%	length(?List:list, +Length:int) is det.
+\begin{code}
+%!	length(+List:list, -Length:int) is det.
+%!	length(?List:list, -Length:int) is nondet.
+%!	length(?List:list, +Length:int) is det.
 %
 %	True if List is a list of length Length.
 %
 %	@compat iso
-\end{verbatim}
+\end{code}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{Tags: \chr{@}param, etc.}
+\section{Tags: \chr{@}see, etc.}
 \label{sec:tags}
 
 Optionally, the description may be followed by one or more \emph{tags}.
-Our tag convention is strongly based on the conventions of javaDoc.
+Our tag convention is strongly based on the conventions used by javaDoc.
 It is adviced to place tags in the order they are described below.
 
 \begin{description}
-    \definition{\chr{@}param {\it Name Description}}
-Defines the parameters. Each parameter has its own param tag. The first
-word is the name of the parameter. The remainder of the tag is the
-description. Parameter declarations must appear in the argument order
+    \definition{\chr{@}arg {\it Name Description}}
+Defines the predicate arguments. Each argument has its own \const{@arg}
+tag. The first word is the name of the argument. The remainder of the
+tag is the description. Arguments declarations normally appear in order
 used by the predicate.
+
+    \definition{\chr{@}param {\it Name Description}}
+This is a synonym for \const{@arg}, using the JavaDoc tag name.
 
     \definition{\chr{@}throws {\it Term Description}}
 Error condition. First Prolog term is the error term. Remainder is the
@@ -305,6 +338,7 @@ in Wiki notation, based on \url[TWiki]{http://www.twiki.org}, with some
 Prolog specific additions.
 
 \subsection{Structuring conventions}
+\label{sec:pldoc-comment-structure}
 
 \begin{description}
     \item [Paragraphs]
@@ -341,7 +375,10 @@ it is common to describe the behaviour on different terms.  Such
 lists must be written as below.  <Term1>, etc. must be valid Prolog
 terms and end in the newline.  The Wiki adds \verb$' . '$ to the text
 and reads it using the operator definitions also used to read
-the mode terms.  See \secref{modes}.
+the mode terms.  See \secref{modes}.  Variable names encountered in
+the \arg{Term} are used for indentifying variables in the following
+\arg{Description}.  At least one \arg{Description} must be non-empty
+to avoid confusion with a simple item list.
 
 \begin{code}
    * Term1
@@ -369,84 +406,160 @@ is started by a \chr{|} sign and the cells are separated by the same
 character.  The last cell must be ended with \chr{|}.  Multiple lines
 that parse into a table-row together form a table.  Example:
 
-\begin{verbatim}
+\begin{code}
 	| Algorithm    | Time (sec) |
 	| Depth first  | 1.0        |
 	| Breath first | 0.7        |
 	| A*           | 0.3        |
-\end{verbatim}
+\end{code}
 
     \item [Section Headers]
 Section headers are creates using one of the constructs below taken
 from TWiki.  Section headers are normally not used in the source-code,
 but can be useful inside README and TODO files.  See \secref{dirindex}.
 
-\begin{verbatim}
+\begin{code}
 ---+ Section level 1
 ---++ Section level 2
 ---+++ Section level 3
 ---++++ Section level 4
-\end{verbatim}
+\end{code}
 
-    \item [Code (verbatim)]
-Verbatim is embedded between lines containing only \verb$==$, as shown
-in the example below.  The indentation of the \verb$==$ must match and
-the indentation of the verbatim text is reduced by the indentation of
-the \verb$==$ marks.
+In addition, PlDoc recognises the \jargon{markdown} syntax, including
+named sections as defined by \program{doxygen}. A section is named
+(labeled) using an optional sequence \verb${\#$\textit{name}\verb$}$.
+The three code sections below provide examples. Note that \texttt{\#}
+section headers should be positioned at the left margin and the
+\texttt{\#} must be followed by blank space. If the header is
+underlined, the underline is a line that only contains \const{=} or
+\const{-} characters. There must be a minimum of three\footnote{Markdown
+demands two, but this results in ambiguities with the \texttt{==} fence
+for code blocks.} of such characters.
 
-\begin{verbatim}
-	==
-	small(X) :-
-		X < 5.
-	==
-\end{verbatim}
 
-    \item [Rules]
-A single line starting at column 1 with at least two dashes is
-translated into a horizontal rule over the page.  For example:
+\begin{code}
+Section level 1
+===============
+
+Section level 2
+---------------
+\end{code}
+
+\begin{code}
+# Section level 1
+## Section level 2
+### Section level 3
+#### Section level 4
+\end{code}
+
+\begin{code}
+Section level 1		{#label}
+===============
+
+# Section level 1	{#label}
+\end{code}
+
+    \item [Code blocks]
+There are two ways to write a code block. The first one is
+\jargon{fenced}. Here, the block is preceeded and followed by a fence
+line.  The traditional PlDoc fence line is \verb$==$.  Doxygen fence
+lines are also accepted.  They contain at least three tilde (\chr{~})
+characters, where the opening fence line may be followed by a file
+extension between curly brackets.  In all cases, the code is indented
+relative to the indentation of the fence line.  Below are two examples,
+the first being the traditional PlDoc style.  The second is the Doxygen
+style, showing a code block that is indented (because it is a body
+fragment) and that is flagged as Prolog source. Note that the
+\verb${.pl}$ is optional.
+
+\begin{code}
+  ==
+  small(X) :-
+     X < 2.
+  ==
+\end{code}
+
+\begin{code}
+  ~~~{.pl}
+    ...,
+    format('Hello ~w~n', [World]),
+    ...,
+  ~~~
+\end{code}
+
+The second form of code blocks are \jargon{indented blocks}. Such a
+block must be indented between 4 and 8 characters, relative to the
+indentation of the last preceeding non-blank line. The block is opened
+with a blank line and closed by a blank line or a line that is indented
+less than the indentation of the initial line. It is allowed to have a
+single blank line in the middle of a code block, provided that the next
+line is again indented at least as much as the initial line. The initial
+line as well as a line that follows a blank line may not be a valid list
+opening line or a table row, i.e., it may not start with one of
+\verb$*-$ followed by a space or \verb$|$.
+
+    \item [Rulers]
+PlDoc accepts both the original PlDoc and markdown conventions for
+rulers. A PlDoc ruler is a line with at least two dashes (-) that starts
+at the left-most column.  A markdown ruler holds at least three ruler
+characters and any number of spaces.  The ruler characters are the
+dash (-), underscore (\verb$_$) or asterisk (\verb$*$).  Below are
+three examples, the last two of which are valid markdown.
 
 \begin{code}
 --
+***
+		- - -
 \end{code}
 
 \end{description}
 
 \subsection{Text markup: fonts and links}
+\label{sec:pldoc-markup}
 
-Wiki text markup to realise fonts is mostly based on old plaintext
-conventions in Usenet and E-mail.  We added Prolog specific
-conventions to this.  For font changing code, the opening symbol must
-be followed immediately by a word and the closing one must immediately
-follow a word.
+\subsubsection{Empahizing text}
+\label{sec:emph}
 
-As code comments frequently contain symbols such as \verb$=$, we ---in
-contrast to normal Wiki conventions--- do font font-switches only if a
-single word is surrounded by \verb$=$, \verb$*$ or \verb$_$.  Longer
-sequences must be created using additional \chr{|}:
+Text emphasis is a combination of old plaintext conventions in Usenet
+and E-mail and the doxygen version of markdown. \Tabref{fonts} shows the
+font-changing constructions.  The phrase \jargon{limited context} means
+that
 
-\begin{code}
-PceEmacs can be set as default editor using
-=|set_prolog_flag(editor, pce_emacs)|=
-\end{code}
+\begin{itemize}
+    \item The opening \chr{*} or \chr{_} must be preceeded by white space
+          or a character from the set \verb$<{([,:;$ and must be
+	  followed by an alphanumerical character.
+    \item The closing \chr{*} or \chr{_} may not be followed by an
+	  alphanumerical character and may not be preceeded by white
+	  space or a character from the set \verb$({[<=+-\@$.
+    \item The scope of these operations is always limited to the
+	  identified structure (paragraph, list item, etc.)
+\end{itemize}
 
-\Tabref{fonts} shows the font-changing constructions, while
-\tabref{links} shows the constructs for creating links.
+Note that \verb$=$<identifier>\verb$=$ is limited to a an
+\jargon{identifier}, such as a file name, XML name, etc. Identifiers
+must start and end with an alphanumerical character, while characters
+from the set \verb$.-/:$ may appear internally. Note that this set
+explicitly does not allow for white space in code spans delimited by a
+single \const{=}. This markup is specifically meant to deal with code
+that is either not Prolog code or invalid Prolog code. Valid Prolog code
+should use the backtick as described in \secref{inlinecode}.
 
 \begin{table}
 \begin{center}
 \begin{tabular}{|l|p{0.7\linewidth}|}
 \hline
-\tt *bold*	& Typset text in \textbf{bold}.
-		  Content must be a single word. \\
-\tt *|bold|*	& Typset text in \textbf{bold}.
+\tt *bold*	& Typeset text in \textbf{bold} for
+		  limited content (see running text). \\
+\tt *|bold|*	& Typeset text in \textbf{bold}.
 		  Content can be long. \\
-\tt _emphasize_ & Typset text as \emph{emphasize}.
-		  Content must be a single word. \\
-\tt _|emphasize|_ & Typset text as \emph{emphasize}.
+\tt _emphasize_ & Typeset text as \emph{emphasize} for
+		  limited content (see running text). \\
+\tt _|emphasize|_ & Typeset text as \emph{emphasize}.
 		  Content can be long. \\
-\tt =code=      & Typset text \texttt{fixed} font.
-		  Content must be a single word. \\
-\tt =|code|=    & Typset text \texttt{fixed} font.
+\tt =code=      & Typeset text \texttt{fixed} font for
+		  identifiers (see running text). \\
+\tt =|code|=    & Typeset text \texttt{fixed} font.
 		  Content can be long. \\
 \tt Word	& Capitalised words that appear as argument-name
 		  are written in \arg{Italic} \\
@@ -457,6 +570,40 @@ PceEmacs can be set as default editor using
     \label{tab:fonts}
 \end{table}
 
+\subsubsection{Inline code}
+\label{sec:inlinecode}
+
+Inline code can be realised using the \verb$=$ switch described in
+\secref{emph} or the markdown backtick. In addition, it can use the
+mardown/Doxygen \jargon{backtick} (\verb$`$) convention: a string
+that is delimited by backticks is considered code, provided:
+
+    \begin{itemize}
+    \item An internal double backtick is translated into a single
+          backtick.
+    \item Inline code is limited to the current structure (paragraph,
+          table cell, list item, etc.
+    \item The content of the code block is valid Prolog syntax.
+	  Note that in Doxygen, the syntax is not validated and
+	  a single quote cancels the recognition as code.  The
+	  latter is a problematic in Prolog because single
+	  quotes are often required.
+    \end{itemize}
+
+Currently, `Var` is typeset as a variable (italics) and other terms
+are typeset using a fixed-width code font.
+
+In addition, compound terms in canonical notation (i.e.,
+\mbox{\textit{functor}\texttt{(},\textit{...args...}\texttt{)}} that can
+be parsed are first verified as a file-specification for
+absolute_file_name/3 and otherwise rendered as \jargon{code}.
+
+
+\subsubsection{Links}
+\label{sec:pldoc-links}
+
+\Tabref{links} shows the constructs for creating links.
+
 \begin{table}
 \begin{center}
 \begin{tabular}{|l|p{0.7\linewidth}|}
@@ -465,10 +612,10 @@ PceEmacs can be set as default editor using
 \tt name//arity & Create a link to a DCG rule \\
 \tt name.ext	& If <name>.<ext> is the name of an existing file
 		  and <ext> is one of \fileext{pl}, \fileext{txt},
-		  \fileext{png}, \fileext{gif}, \fileext{jpeg},
+		  \fileext{md}, \fileext{png}, \fileext{gif}, \fileext{jpeg},
 		  \fileext{jpg} or \fileext{svg}, create a link to the file. \\
-\tt prot\verb$://$url	& If <prot> is one of \const{http} or
-		  \const{ftp}, create a link. \\
+\tt prot\verb$://$url & If <prot> is one of \const{http}, \const{https}
+		  or \const{ftp}, create a link. \\
 \tt\chr{<}url\chr{>} & Create a hyperlink to URL.  This construct
 		  supports the expand_url_path/2 using the construct
 		  <alias>:<local>.  <local> can be empty. \\
@@ -479,6 +626,8 @@ PceEmacs can be set as default editor using
 		  \chr{;}<name>=\chr{"}<value>\chr{"}.  More
 		  arguments are separated by commas. <link> must be a
 		  filename as above or a url. \\
+\tt\verb$[$label\verb$]($link\verb$)$ &
+		  The markdown version of the above. \\
 \hline
 \end{tabular}
 \end{center}
@@ -489,6 +638,7 @@ PceEmacs can be set as default editor using
 
 
 \subsection{Images}
+\label{sec:pldoc-images}
 
 Images can be included in the documentation by referencing an image file
 using one of the extensions \fileext{gif}, \fileext{png},
@@ -501,6 +651,14 @@ brackets. For example
 
 \begin{code}
 The [[open.png]] icon is used open an existing file.
+\end{code}
+
+The markdown alternative for images is also supported, and looks as
+below.  The current implementation only deals with image \emph{files},
+not external resources.
+
+\begin{code}
+    ![Caption](File)
 \end{code}
 
 
@@ -527,7 +685,7 @@ source. The two fragments below illustrate the relation between an
 \fileext{pl} file and a \fileext{txt} file.
 
 \begin{code}
-%%	read_setup(+File, -Setup) is det.
+%!	read_setup(+File, -Setup) is det.
 %
 %	Read application setup information from File.  The details
 %	on setup are described in setup.txt.
@@ -547,6 +705,7 @@ application will process this data using setup.pl. ...
 
 
 \subsection{During development}
+\label{sec:pldoc-development}
 
 To support the developer with an up-to-date version of the documentation
 of both the application under development and the system libraries the
@@ -663,6 +822,7 @@ starting the server using doc_server/1.  This section briefly explains
 the user-interface provided from the browser.
 
 \subsubsection{Searching}
+\label{sec:pldoc-search}
 
 The top-right of the screen provides a search-form. The search string
 typed is searched as a substring and case-insensitive. Multiple strings
@@ -688,6 +848,7 @@ search. \textsf{All} searches both the application and manuals.
 Searching for \textsf{Summary} also implies \textsf{Name}.
 
 \subsubsection{Views}
+\label{sec:pldoc-views}
 
 The web-browser supports several views, which we briefly summarise
 here:
@@ -723,6 +884,7 @@ enclosing section (\emph{Up}).
 
 
 \subsubsection{Editing}
+\label{sec:pldoc-editing}
 
 If the browser is accessed from \const{localhost}, each object that
 is related to a known source-location has an edit icon at the right
@@ -808,7 +970,6 @@ with minimal layout conventions taken largely from plaintext newsnet and
 E-mail, Wiki input is much easier to read in the source-file than HTML
 without syntax support from an editor.
 
-
 \subsection*{Types and modes}
 \label{sec:motivation:modes}
 
@@ -840,6 +1001,30 @@ is written in Prolog. Output as HTML is suitable for browsing and not
 very high quality printing on virtually all platforms. Output to
 \LaTeX{} requires more infrastructure for processing and allows for
 producing high-quality PDF documents.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Compatibility and standards}
+\label{sec:pldoc-compatibility}
+
+Initially, the PlDoc wiki language was based on
+\url[Twiki]{http://www.twiki.org}. Currently,
+\url[markdown]{http://en.wikipedia.org/wiki/Markdown} is a wiki syntax
+that is widely accepted and not tight to a single system.  In PlDoc~2,
+we have adopted markdown, including many of the limitations and
+extensions introduced by
+\url[Docygen]{http://www.stack.nl/~dimitri/doxygen/}.  Limitations are
+needed to avoid ambiguities due to the common use of symbol charaters
+in programming languages. Extensions are desirable to make use of
+already existing conventions and support requirements of program
+documentation.
+
+Some of the changes in PlDoc~2 are to achieve compatibility with the
+\url[Prolog Commons]{http://prolog-commons.org/} project. The library
+documentation conventions of this project will be based on PlDoc and the
+Ciao lpdoc standards.  It is likely that there will be more changes to
+the PlDoc format to synchronise with Commons.  We do not anticipate
+significant impact on existing documentation.
+
 
 \bibliographystyle{name}
 \bibliography{pl}

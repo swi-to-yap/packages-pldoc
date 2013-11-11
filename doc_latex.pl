@@ -1,11 +1,10 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
-    E-mail:        wielemak@science.uva.nl
+    E-mail:        J.Wielemaker@vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 2007, University of Amsterdam
+    Copyright (C): 2007-2013, University of Amsterdam
+			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
     modify it under the terms of the GNU General Public License
@@ -310,13 +309,13 @@ latex([]) --> !,
 	[].
 latex(Atomic) -->
 	{ string(Atomic),
-	  string_to_atom(Atomic, Atom),
+	  atom_string(Atom, Atomic),
 	  sub_atom(Atom, 0, _, 0, 'LaTeX')
 	}, !,
 	[ latex('\\LaTeX{}') ].
 latex(Atomic) -->			% can this actually happen?
 	{ atomic(Atomic), !,
-	  string_to_atom(Atomic, Atom),
+	  atom_string(Atom, Atomic),
 	  findall(x, sub_atom(Atom, _, _, _, '\n'), Xs),
 	  length(Xs, Lines)
 	},
@@ -408,8 +407,8 @@ latex(dd(_, Content)) -->
 	latex(Content).
 latex(dd(Content)) -->
 	latex(Content).
-latex(dt(class=term, \term(Term, Bindings))) -->
-	termitem(Term, Bindings).
+latex(dt(class=term, \term(Text, Term, Bindings))) -->
+	termitem(Text, Term, Bindings).
 latex(dt(Content)) -->
 	latex(cmd(item(opt(Content)))).
 latex(table(Attrs, Content)) -->
@@ -532,7 +531,7 @@ fragile_list([H|T]) -->
 
 latex_arg(H) -->
 	{ atomic(H),
-	  string_to_atom(H, Atom),
+	  atom_string(Atom, H),
 	  urldef_name(Atom, Name)
 	}, !,
 	latex(cmd(Name)).
@@ -612,7 +611,7 @@ latex_section(Level, Attrs, Content) -->
 	section_label(Attrs).
 
 section_label(Attrs) -->
-	{ memberchk(name(Name), Attrs), !,
+	{ memberchk(id(Name), Attrs), !,
 	  delete_unsafe_label_chars(Name, SafeName),
 	  atom_concat('sec:', SafeName, Label)
 	},
@@ -656,15 +655,23 @@ include(PI, predicate, _) --> !,
 	->  []
 	;   latex(cmd(item(['[[', \predref(PI), ']]'])))
 	).
-include(File, Type, _) -->
+include(File, Type, Options) -->
 	{ existing_linked_file(File, Path) }, !,
-	include_file(Path, Type).
+	include_file(Path, Type, Options).
 include(File, _, _) -->
 	latex(code(['[[', File, ']]'])).
 
-include_file(Path, image) --> !,
+include_file(Path, image, Options) -->
+	{ option(caption(Caption), Options) }, !,
+	latex(cmd(begin(figure, [no_escape(htbp)]))),
+	latex(cmd(begin(center))),
+	latex(cmd(includegraphics(Path))),
+	latex(cmd(end(center))),
+	latex(cmd(caption(Caption))),
+	latex(cmd(end(figure))).
+include_file(Path, image, _) --> !,
 	latex(cmd(includegraphics(Path))).
-include_file(Path, Type) -->
+include_file(Path, Type, _) -->
 	{ assertion(memberchk(Type, [prolog,wiki])),
 	  current_options(Options0),
 	  select_option(stand_alone(_), Options0, Options1, _),
@@ -707,8 +714,8 @@ predref(Name//Arity) -->
 %	Emit tag list produced by the   Wiki processor from the @keyword
 %	commands.
 
-tags([\params(Params)|Rest]) --> !,
-	params(Params),
+tags([\args(Params)|Rest]) --> !,
+	args(Params),
 	tags_list(Rest).
 tags(List) -->
 	tags_list(List).
@@ -745,24 +752,24 @@ tag_value_list([H|T]) -->
 	;   []
 	).
 
-%%	params(+Params:list) is det.
+%%	args(+Params:list) is det.
 %
-%	Called from \params(List) created by   doc_wiki.pl.  Params is a
-%	list of param(Name, Descr).
+%	Called from \args(List) created by   doc_wiki.pl.  Params is a
+%	list of arg(Name, Descr).
 
-params(Params) -->
-	latex([ cmd(begin(parameters)),
-		\param_list(Params),
-		cmd(end(parameters))
+args(Params) -->
+	latex([ cmd(begin(arguments)),
+		\arg_list(Params),
+		cmd(end(arguments))
 	      ]).
 
-param_list([]) -->
+arg_list([]) -->
 	[].
-param_list([H|T]) -->
-	param(H),
-	param_list(T).
+arg_list([H|T]) -->
+	argument(H),
+	arg_list(T).
 
-param(param(Name,Descr)) -->
+argument(arg(Name,Descr)) -->
 	[ nl(1) ],
 	latex(cmd(arg(Name))), [ latex(' & ') ],
 	latex(Descr), [latex(' \\\\')].
@@ -777,7 +784,7 @@ file_header(File, Options) -->
 	},
 	file_title([Synopsis, ': ', Title], File, Options),
 	{ is_structured_comment(Comment, Prefixes),
-	  string_to_list(Comment, Codes),
+	  string_codes(Comment, Codes),
 	  indented_lines(Codes, Prefixes, Lines),
 	  section_comment_header(Lines, _Header, Lines1),
 	  wiki_lines_to_dom(Lines1, [], DOM0),
@@ -840,7 +847,7 @@ object(Obj, Mode0, Mode, Options) -->
 object(Obj, Pos, Comment, Mode0, Mode, Options) -->
 	{ is_pi(Obj), !,
 	  is_structured_comment(Comment, Prefixes),
-	  string_to_list(Comment, Codes),
+	  string_codes(Comment, Codes),
 	  indented_lines(Codes, Prefixes, Lines),
 	  strip_module(user:Obj, Module, _),
 	  process_modes(Lines, Module, Pos, Modes, Args, Lines1),
@@ -1071,13 +1078,13 @@ argtype(Term) -->
 		 ]) },
 	latex(S).
 
-%%	term(+Term, +Bindings)// is det.
+%%	term(+Text, +Term, +Bindings)// is det.
 %
 %	Process the \term element as produced by doc_wiki.pl.
 %
 %	@tbd	Properly merge with pred_head//1
 
-term(Term, Bindings) -->
+term(_, Term, Bindings) -->
 	{ bind_vars(Bindings) },
 	term(Term).
 
@@ -1104,11 +1111,11 @@ term_with_args(Functor, Args) -->
 	latex(cmd(term(Functor, \pred_args(Args, 1)))).
 
 
-%%	termitem(+Term, +Bindings)// is det.
+%%	termitem(+Text, +Term, +Bindings)// is det.
 %
 %	Create a termitem or one of its variations.
 
-termitem(Term, Bindings) -->
+termitem(_Text, Term, Bindings) -->
 	{ bind_vars(Bindings) },
 	termitem(Term).
 
@@ -1324,7 +1331,7 @@ replace([H|T0], F, N, [H|T]) :-
 %	Print Text, such that it comes out as normal LaTeX text.
 
 print_latex(Out, String) :-
-	string_to_atom(String, Atom),
+	atom_string(Atom, String),
 	atom_chars(Atom, Chars),
 	print_chars(Chars, Out).
 

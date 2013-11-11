@@ -75,7 +75,7 @@ cross-reference based technology as used by PceEmacs.
 %
 %	Colourise Prolog source as HTML. The idea   is to first create a
 %	sequence of fragments and  then  to   apply  these  to the code.
-%	Options are passed to print_html_head/2. Options are passed to
+%	Options are passed to the following predicates:
 %
 %	  * print_html_head/2
 %	  * print_html_footer/2.
@@ -425,8 +425,8 @@ read_n_codes(In, N, Codes) :-
 	get_code(In, C0),
 	read_n_codes(N, C0, In, Codes).
 
-read_n_codes(1, C, _, [C]) :- !.
 read_n_codes(_, -1, _, []) :- !.
+read_n_codes(1, C, _, [C]) :- !.
 read_n_codes(N, C, In, [C|T]) :-
 	get_code(In, C2),
 	N2 is N - 1,

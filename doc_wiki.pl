@@ -1,11 +1,10 @@
-/*  $Id$
-
-    Part of SWI-Prolog
+/*  Part of SWI-Prolog
 
     Author:        Jan Wielemaker
-    E-mail:        J.Wielemaker@uva.nl
+    E-mail:        J.Wielemaker@vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 2006-2009, University of Amsterdam
+    Copyright (C): 2006-2013, University of Amsterdam
+			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
     modify it under the terms of the GNU General Public License
@@ -46,6 +45,20 @@
 :- use_module(library(memfile)).
 :- use_module(library(pairs)).
 :- use_module(library(option)).
+:- use_module(library(debug)).
+:- use_module(library(apply)).
+
+
+/** <module> PlDoc wiki parser
+
+This file defines the PlDoc wiki parser,  which parses both comments and
+wiki text files. The original version of this SWI-Prolog wiki format was
+largely modeled after Twiki (http://twiki.org/).  The current version is
+extended to take many aspects from   markdown, in particular the doxygen
+refinement thereof.
+
+@see http://www.stack.nl/~dimitri/doxygen/manual/markdown.html
+*/
 
 
 		 /*******************************
@@ -116,13 +129,16 @@ take_block([N-['|'|RL1]|LT], _, Table, Rest) :-
 	phrase(row(R0), RL1),
 	rest_table(LT, N, RL, Rest), !,
 	Table = table(class=wiki, [tr(R0)|RL]).
-take_block([0-[-,-|More]|LT], _, Block, LT) :-	% seperation line
+take_block([0-[-,-|More]|LT], _, Block, LT) :-  % seperation line
 	maplist(=(-), More), !,
+	Block = hr([]).
+take_block([_-Line|LT], _, Block, LT) :-	% seperation line
+	ruler(Line), !,
 	Block = hr([]).
 take_block([_-[@|_]], _, _, _) :- !,		% starts @tags section
 	fail.
-take_block([_-L1|LT], _, Section, LT) :-
-	section_line(L1, Section), !.
+take_block(Lines, _BaseIndent, Section, RestLines) :-
+	section_header(Lines, Section, RestLines), !.
 take_block([_-Verb|Lines], _, Verb, Lines) :-
 	verbatim_term(Verb), !.
 take_block([I-L1|LT], BaseIndent, Elem, Rest) :- !,
@@ -136,6 +152,21 @@ take_block([I-L1|LT], BaseIndent, Elem, Rest) :- !,
 	).
 take_block([Verb|Lines], _, Verb, Lines).
 
+%%	ruler(+Line) is semidet.
+%
+%	True if Line contains 3 ruler chars and otherwise spaces.
+
+ruler([C0|Line]) :-
+	rule_char(C0),
+	phrase(ruler(C0, 1), Line).
+
+ruler(C, N) --> [C], !, { N2 is N+1 }, ruler(C, N2).
+ruler(C, N) --> [' '], !, ruler(C, N).
+ruler(_, N) --> { N >= 3 }.
+
+rule_char('-').
+rule_char('_').
+rule_char('*').
 
 %%	list_item(+Lines, ?Type, ?Indent, -LI0, -LIT, -RestLines) is det.
 %
@@ -172,6 +203,9 @@ rest_list_item(Lines, _Type, Indent, RestItem, RestLines) :-
 %
 %	Process paragraphs and verbatim blocks (==..==) in bullet-lists.
 
+take_blocks_at_indent(Lines, _, [], Lines) :-
+	skip_empty_lines(Lines, Lines1),
+	section_header(Lines1, _, _), !.
 take_blocks_at_indent(Lines, N, [Block|RestBlocks], RestLines) :-
 	take_block(Lines, N, Block, Rest0), !,
 	take_blocks_at_indent(Rest0, N, RestBlocks, RestLines).
@@ -215,14 +249,16 @@ split_dt(In, DT, Rest) :-
 %%	ul_to_dl(+UL, -DL) is semidet.
 %
 %	Translate an UL list into a DL list   if  all entries are of the
-%	form "* <term> nl, <description>" or all   items  are of the for
+%	form "* <term> nl, <description>" and at least one <description>
+%	is   non-empty,   or    all    items     are    of    the   form
 %	[[PredicateIndicator]].
 
 ul_to_dl(ul(Items), Description) :-
 	term_items(Items, DLItems, []),
 	(   terms_to_predicate_includes(DLItems, Preds)
 	->  Description = dl(class(predicates), Preds)
-	;   Description = dl(class(termlist), DLItems)
+	;   member(dd(DD), DLItems), DD \== []
+	->  Description = dl(class(termlist), DLItems)
 	).
 
 term_items([], T, T).
@@ -233,11 +269,12 @@ term_items([LI|LIs], DLItems, Tail) :-
 %%	term_item(+LI, -DLItem, ?Tail) is semidet.
 %
 %	If LI is of the form <Term> followed  by a newline, return it as
-%	dt-dd  tuple.  The  <dt>  item    contains  a  term  \term(Term,
-%	Bindings).
+%	dt-dd  tuple.  The  <dt>  item    contains  a  term
+%
+%	    \term(Text, Term, Bindings).
 
 term_item(li(Tokens),
-	  [ dt(class=term, \term(Term, Bindings)),
+	  [ dt(class=term, \term(Text, Term, Bindings)),
 	    dd(Descr)
 	  | Tail
 	  ], Tail) :-
@@ -246,17 +283,24 @@ term_item(li(Tokens),
 	    ;	TermTokens = Tokens,
 		Descr = []
 	    )
-	->  new_memory_file(MemFile),
-	    open_memory_file(MemFile, write, Out),
-	    forall(member(T, TermTokens),
-		   write_token(Out, T)),
-	    write(Out, ' .\n'),
-	    close(Out),
-	    open_memory_file(MemFile, read, In),
-	    catch(call_cleanup((read_dt_term(In, Term, Bindings),
-				read_dt_term(In, end_of_file, [])),
-			       (close(In),
-				free_memory_file(MemFile))),
+	->  setup_call_cleanup(
+		( new_memory_file(MemFile),
+		  open_memory_file(MemFile, write, Out)
+		),
+		( forall(member(T, TermTokens),
+			 write_token(Out, T)),
+		  write(Out, ' .\n')
+		),
+		close(Out)),
+	    catch(setup_call_cleanup(
+		      open_memory_file(MemFile, read, In,
+				       [ free_on_close(true)
+				       ]),
+		      ( read_dt_term(In, Term, Bindings),
+			read_dt_term(In, end_of_file, []),
+			memory_file_to_atom(MemFile, Text)
+		      ),
+		      close(In)),
 		  _, fail)
 	).
 
@@ -272,7 +316,7 @@ read_dt_term(In, Term, Bindings) :-
 		  ]).
 
 terms_to_predicate_includes([], []).
-terms_to_predicate_includes([dt(class=term, \term([[PI]], [])), dd([])|T0],
+terms_to_predicate_includes([dt(class=term, \term(_, [[PI]], [])), dd([])|T0],
 			    [\include(PI, predicate, [])|T]) :-
 	is_pi(PI),
 	terms_to_predicate_includes(T0, T).
@@ -333,7 +377,8 @@ rest_table(Rest, _, [], Rest).
 %	Why not a  general  block-level   object?  The  current defition
 %	allows for writing lists without a blank line between the items.
 
-rest_par([], [], _, MaxI, MaxI, []) :- !.
+rest_par([], [], BI, MaxI0, MaxI, []) :- !,
+	MaxI is max(BI, MaxI0).
 rest_par([_-[]|Rest], [], _, MaxI, MaxI, Rest) :- !.
 rest_par(Lines, [], _, MaxI, MaxI, Lines) :-
 	Lines = [_-Verb|_],
@@ -346,13 +391,24 @@ rest_par([I-L1|LT], ['\n'|Par], BI, MaxI0, MaxI, Rest) :-
 	rest_par(LT, PT, BI, MaxI1, MaxI, Rest).
 
 
-%%	section_line(+Tokens, -Section) is det.
+%%	section_header(+Lines, -Section, -RestLines) is semidet.
+%
+%	Get a section line from the input.
+
+section_header([_-L1|LT], Section, LT) :-
+	twiki_section_line(L1, Section), !.
+section_header([0-L1|LT], Section, LT) :-
+	md_section_line(L1, Section), !.
+section_header([_-L1,0-L2|LT], Section, LT) :-
+	md_section_line(L1, L2, Section), !.
+
+%%	twiki_section_line(+Tokens, -Section) is semidet.
 %
 %	Extract a section using the Twiki   conventions. The section may
 %	be preceeded by [Word], in which case we generate an anchor name
 %	Word for the section.
 
-section_line([-,-,-|Rest], Section) :-
+twiki_section_line([-,-,-|Rest], Section) :-
 	plusses(Rest, Section).
 
 plusses([+, ' '|Rest], h1(Attrs, Content)) :-
@@ -368,10 +424,61 @@ hdr_attributes(List, Attrs, Content) :-
 	strip_leading_ws(List, List2),
 	(   List2 = ['[',w(Name),']'|List3]
 	->  strip_ws_tokens(List3, Content),
-	    Attrs = [class(wiki), name(Name)]
+	    Attrs = [class(wiki), id(Name)]
 	;   Attrs = class(wiki),
 	    strip_ws_tokens(List, Content)
 	).
+
+%%	md_section_line(+Tokens, -Section) is semidet.
+%
+%	Handle markdown section lines staring with #
+
+md_section_line([#, ' '|Rest], h1(Attrs, Content)) :-
+	md_section_attributes(Rest, Attrs, Content).
+md_section_line([#, #, ' '|Rest], h2(Attrs, Content)) :-
+	md_section_attributes(Rest, Attrs, Content).
+md_section_line([#, #, #, ' '|Rest], h3(Attrs, Content)) :-
+	md_section_attributes(Rest, Attrs, Content).
+md_section_line([#, #, #, #, ' '|Rest], h4(Attrs, Content)) :-
+	md_section_attributes(Rest, Attrs, Content).
+
+md_section_attributes(List, Attrs, Content) :-
+	phrase((tokens(Content), [' '], section_label(Label)), List), !,
+	Attrs = [class(wiki), id(Label)].
+md_section_attributes(Content, Attrs, Content) :-
+	Attrs = [class(wiki)].
+
+section_label(Label) -->
+	[ '{', '#', w(Name) ],
+	label_conts(Cont), ['}'], !,
+	{ atomic_list_concat([Name|Cont], Label) }.
+
+label_conts([H|T]) --> label_cont(H), !, label_conts(T).
+label_conts([]) --> [].
+
+label_cont(-) --> [-].
+label_cont(Name) --> [w(Name)].
+
+
+md_section_line(Line1, Line2, Header) :-
+	Line1 \== [],
+	section_underline(Line2, Type),
+	phrase(wiki_words(_), Line1), !,% Should not have structure elements
+	(   phrase(labeled_section_line(Title, Attrs), Line1)
+	->  true
+	;   Title = Line1,
+	    Attrs = []
+	),
+	Header =.. [Type, [class(wiki)|Attrs], Title].
+
+section_underline([=,=,=|T], h1) :-
+	maplist(=(=), T), !.
+section_underline([-,-,-|T], h2) :-
+	maplist(=(-), T), !.
+
+labeled_section_line(Title, Attrs) -->
+	tokens(Title), [' '], section_label(Label), !,
+	{ Attrs = [id(Label)] }.
 
 
 %%	strip_ws_tokens(+Tokens, -Stripped)
@@ -434,9 +541,9 @@ collect_tags([Indent-[@,String|L0]|Lines], [Order-tag(Tag,Value)|Tags]) :-
 %	If String denotes a know tag-name,
 
 tag_name(w(Name), Tag, Order) :-
-	(   renamed_tag(Name, Tag),
+	(   renamed_tag(Name, Tag, Level),
 	    tag_order(Tag, Order)
-	->  print_message(warning, pldoc(deprecated_tag(Name, Tag)))
+	->  print_message(Level, pldoc(deprecated_tag(Name, Tag)))
 	;   tag_order(Name, Order)
 	->  Tag = Name
 	;   print_message(warning, pldoc(unknown_tag(Name))),
@@ -452,11 +559,12 @@ rest_tag([L|Lines0], Indent, [L|VT], Lines) :-
 	rest_tag(Lines0, Indent, VT, Lines).
 
 
-%%	renamed_tag(+DeprecatedTag:atom, -Tag:atom) is semidet.
+%%	renamed_tag(+DeprecatedTag:atom, -Tag:atom, -Warn) is semidet.
 %
 %	Declaration for deprecated tags.
 
-renamed_tag(exception, throws).
+renamed_tag(exception, throws, warning).
+renamed_tag(param,     arg,    silent).
 
 
 %%	tag_order(+Tag:atom, -Order:int) is semidet.
@@ -470,7 +578,7 @@ renamed_tag(exception, throws).
 
 tag_order(Tag, Order) :-
 	pldoc:tag_order(Tag, Order), !.
-tag_order(param,       100).
+tag_order(arg,         100).
 tag_order(error,       200).		% same as throw
 tag_order(throws,      300).
 tag_order(author,      400).
@@ -493,25 +601,25 @@ tag_order(tbd,	      1200).
 %	Descr is a list of tokens.
 
 combine_tags([], []).
-combine_tags([tag(param, V1)|T0], [\params([P1|PL])|Tags]) :- !,
-	param_tag(V1, P1),
-	param_tags(T0, PL, T1),
+combine_tags([tag(arg, V1)|T0], [\args([P1|PL])|Tags]) :- !,
+	arg_tag(V1, P1),
+	arg_tags(T0, PL, T1),
 	combine_tags(T1, Tags).
 combine_tags([tag(Tag,V0)|T0], [\tag(Tag, [V0|Vs])|T]) :-
 	same_tag(Tag, T0, T1, Vs),
 	combine_tags(T1, T).
 
-param_tag([PT|Descr0], param(PN, Descr)) :-
+arg_tag([PT|Descr0], arg(PN, Descr)) :-
 	word_of(PT, PN),
 	strip_leading_ws(Descr0, Descr).
 
-word_of(w(W), W) :- !.			% TBD: check non-word param
+word_of(w(W), W) :- !.			% TBD: check non-word arg
 word_of(W, W).
 
-param_tags([tag(param, V1)|T0], [P1|PL], T) :- !,
-	param_tag(V1, P1),
-	param_tags(T0, PL, T).
-param_tags(T, [], T).
+arg_tags([tag(arg, V1)|T0], [P1|PL], T) :- !,
+	arg_tag(V1, P1),
+	arg_tags(T0, PL, T).
+arg_tags(T, [], T).
 
 same_tag(Tag, [tag(Tag, V)|T0], T, [V|Vs]) :- !,
 	same_tag(Tag, T0, T, Vs).
@@ -527,6 +635,12 @@ same_tag(_, L, L, []).
 %	Given the wiki structure, analyse the content of the paragraphs,
 %	list items and table cells and apply font faces and links.
 
+wiki_faces([dt(Class, \term(Text, Term, Bindings)), dd(Descr0)|T0],
+	   ArgNames,
+	   [dt(Class, \term(Text, Term, Bindings)), dd(Descr)|T]) :- !,
+	varnames(Bindings, VarNames, ArgNames),
+	wiki_faces(Descr0, VarNames, Descr),
+	wiki_faces(T0, ArgNames, T).
 wiki_faces(DOM0, ArgNames, DOM) :-
 	structure_term(DOM0, Functor, Content0), !,
 	wiki_faces_list(Content0, ArgNames, Content),
@@ -536,6 +650,10 @@ wiki_faces(Verb, _, Verb) :-
 wiki_faces(Content0, ArgNames, Content) :-
 	assertion(is_list(Content0)),
 	phrase(wiki_faces(Content, ArgNames), Content0), !.
+
+varnames([], List, List).
+varnames([Name=_|T0], [Name|T], List) :-
+	varnames(T0, T, List).
 
 wiki_faces_list([], _, []).
 wiki_faces_list([H0|T0], Args, [H|T]) :-
@@ -549,8 +667,8 @@ wiki_faces_list([H0|T0], Args, [H|T]) :-
 %	and re-pack the structure.
 
 structure_term(\tags(Tags), tags, [Tags]) :- !.
-structure_term(\params(Params), params, [Params]) :- !.
-structure_term(param(Name,Descr), param(Name), [Descr]) :- !.
+structure_term(\args(Params), args, [Params]) :- !.
+structure_term(arg(Name,Descr), arg(Name), [Descr]) :- !.
 structure_term(\tag(Name,Value), tag(Name), [Value]) :- !.
 structure_term(\include(What,Type,Opts), include(What,Type,Opts), []) :- !.
 structure_term(dl(Att, Args), dl(Att), [Args]) :- !.
@@ -584,7 +702,25 @@ structure_tag(center).
 %	True if Term must be passes verbatim.
 
 verbatim_term(pre(_,_)).
-verbatim_term(\term(_,_)).
+verbatim_term(\term(_,_,_)).
+
+%%	matches(:Goal, -Input, -Last)//
+%
+%	True when Goal runs successfully on the DCG input and Input
+%	is the list of matched tokens.
+
+matches(Goal, Input, Last, List, Rest) :-
+	call(Goal, List, Rest),
+	input(List, Rest, Input, Last).
+
+input([H|T0], Rest, Input, Last) :-
+	(   T0 == Rest
+	->  Input = [H],
+	    Last = H
+	;   Input = [H|T],
+	    input(T0, Rest, T, Last)
+	).
+
 
 %%	wiki_faces(-WithFaces, +ArgNames)// is nondet.
 %
@@ -592,9 +728,29 @@ verbatim_term(\term(_,_)).
 %	faces are applied after discovering   the structure (paragraphs,
 %	lists, tables, keywords).
 
-wiki_faces([], _) -->
+wiki_faces([EmphTerm|T], ArgNames) -->
+	emphasis_start(C),
+	matches(wiki_faces(Emph, ArgNames), Input, Last),
+	emphasis_end(C),
+	{ emph_markdown(Last, Input),
+	  emphasis_term(C, Emph, EmphTerm)
+	}, !,
+	wiki_faces_int(T, ArgNames).
+wiki_faces(Faces, ArgNames) -->
+	wiki_faces_int(Faces, ArgNames).
+
+wiki_faces_int([], _) -->
 	[].
-wiki_faces([H|T], ArgNames) -->
+wiki_faces_int([Before,EmphTerm|T], ArgNames) -->
+	emphasis_before(Before),
+	emphasis_start(C),
+	matches(wiki_faces(Emph, ArgNames), Input, Last),
+	emphasis_end(C),
+	{ emph_markdown(Last, Input),
+	  emphasis_term(C, Emph, EmphTerm)
+	}, !,
+	wiki_faces_int(T, ArgNames).
+wiki_faces_int([H|T], ArgNames) -->
 	wiki_face(H, ArgNames),
 	wiki_faces(T, ArgNames).
 
@@ -602,23 +758,26 @@ wiki_face(var(Arg), ArgNames) -->
 	[w(Arg)],
 	{ memberchk(Arg, ArgNames)
 	}, !.
-wiki_face(b(Bold), _) -->
-	[*, w(Bold), *], !.
 wiki_face(b(Bold), ArgNames) -->
-	[*,'|'], wiki_faces(Bold, ArgNames), ['|',*], !.
-wiki_face(i(Italic), _) -->
-	['_', w(Italic), '_'], !.
+	[*,'|'], wiki_faces_int(Bold, ArgNames), ['|',*], !.
 wiki_face(i(Italic), ArgNames) -->
-	['_','|'], wiki_faces(Italic, ArgNames), ['|','_'], !.
+	['_','|'], wiki_faces_int(Italic, ArgNames), ['|','_'], !.
 wiki_face(code(Code), _) -->
-	[=, w(Code), =], !.
+	[=], eq_code_words(Words), [=], !,
+	{ atomic_list_concat(Words, Code) }.
 wiki_face(code(Code), _) -->
 	[=,'|'], wiki_words(Code), ['|',=], !.
+wiki_face(Code, _) -->
+	['`'], code_words(Words), ['`'],
+	{ atomic_list_concat(Words, Text),
+	  catch(atom_to_term(Text, Term, Vars), _, fail), !,
+	  code_face(Text, Term, Vars, Code)
+	}.
 wiki_face(Face, _) -->
 	[ w(Name) ], arg_list(List),
 	{ atomic_list_concat([Name|List], Text),
 	  catch(atom_to_term(Text, Term, Vars), _, fail),
-	  term_face(Term, Vars, Face)
+	  term_face(Text, Term, Vars, Face)
 	}, !.
 wiki_face(\predref(Name/Arity), _) -->
 	[ w(Name), '/' ], arity(Arity),
@@ -647,13 +806,26 @@ wiki_face(\include(Name, Type, Options), _) -->
 	  file_name_extension(Base, Ext, Name),
 	  resolve_file(Name, Options, [])
 	}, !.
+wiki_face(\include(Name, Type, [caption(Caption)|Options]), _) -->
+	(   ['!','['], tokens(Caption), [']','(']
+	->  file_name(Base, Ext), [')'],
+	    { autolink_extension(Ext, Type), !,
+	      file_name_extension(Base, Ext, Name),
+	      resolve_file(Name, Options, [])
+	    }
+	), !.
 wiki_face(Link, _ArgNames) -->		% [[Label][Link]]
-	['[','['],
-	tokens(LabelParts),
-	[']','['],
-	wiki_link(Link, [label(Label), relative(true), end(']')]),
-	[']',']'], !,
-	{ make_label(LabelParts, Label) }.
+	(   ['[','['], tokens(LabelParts), [']','[']
+	->  wiki_link(Link, [label(Label), relative(true), end(']')]),
+	    [']',']'], !,
+	    { make_label(LabelParts, Label) }
+	).
+wiki_face(Link, _ArgNames) -->		% Markdown: [Label](Link)
+	(   ['['], tokens(LabelParts), [']','(']
+	->  wiki_link(Link, [label(Label), relative(true), end(')')]),
+	    [')'], !,
+	    { make_label(LabelParts, Label) }
+	).
 wiki_face(Link, _ArgNames) -->
 	wiki_link(Link, []), !.
 wiki_face(Word, _) -->
@@ -667,8 +839,123 @@ wiki_face(FT, ArgNames) -->
 	}.
 
 wiki_words([]) --> [].
-wiki_words([Word|T]) --> [w(Word)], wiki_words(T).
+wiki_words([Word|T]) --> [w(Word)], !, wiki_words(T).
 wiki_words([Punct|T]) --> [Punct], {atomic(Punct)}, wiki_words(T).
+
+%%	code_words(-Words)//
+%
+%	True when Words is the  content   as  it  appears in =|`code`|=,
+%	where =|``|= is mapped to =|`|=.
+
+code_words([]) --> [].
+code_words([Word|T]) --> [w(Word)], code_words(T).
+code_words(CodeL) --> ['`','`'], {CodeL = ['`'|T]}, code_words(T).
+code_words([Punct|T]) --> [Punct], {atomic(Punct)}, code_words(T).
+
+%%	eq_code_words(-Words)//
+%
+%	Stuff that can be between single `=`.  This is limited to
+%
+%		- Start and end must be a word
+%		- In between may be the following punctuation chars:
+%		  =|.-:/|=, notably dealing with file names and
+%		  identifiers in various external languages.
+
+eq_code_words([Word]) -->
+	[ w(Word) ].
+eq_code_words([Word|T]) -->
+	[ w(Word) ], eq_code_internals(T, [End]), [w(End)].
+
+eq_code_internals(T, T) --> [].
+eq_code_internals([H|T], Tail) -->
+	eq_code_internal(H),
+	eq_code_internals(T, Tail).
+
+eq_code_internal(Word) -->
+	[w(Word)].
+eq_code_internal(Punct) -->
+	[Punct],
+	{ eq_code_internal_punct(Punct) }.
+
+eq_code_internal_punct('.').
+eq_code_internal_punct('-').
+eq_code_internal_punct(':').
+eq_code_internal_punct('/').
+
+
+%%	code_face(+Text, +Term, +Vars, -Code) is det.
+%
+%	Deal with =|`... code ...`|=  sequences.   Text  is  the matched
+%	text, Term is the parsed Prolog term   and Code is the resulting
+%	intermediate code.
+
+code_face(Text, Var, _, Code) :-
+	var(Var), !,
+	Code = var(Text).
+code_face(Text, _, _, code(Text)).
+
+
+%%	emphasis_term(+Emphasis, +Tokens, -Term) is det.
+%%	emphasis_before(-Before)// is semidet.
+%%	emphasis_start(-Emphasis)// is semidet.
+%%	emphasis_end(+Emphasis)// is semidet.
+%
+%	Primitives for Doxygen emphasis handling.
+
+emphasis_term('_',   Term, i(Term)).
+emphasis_term('*',   Term, b(Term)).
+emphasis_term('__',  Term, strong(Term)).
+emphasis_term('**',  Term, strong(Term)).
+
+emph_markdown(_, [w(_)]) :- !.
+emph_markdown(Last, Tokens) :-
+	\+ emphasis_after_sep(Last),
+	(   catch(b_getval(pldoc_object, Obj), _, fail)
+	->  true
+	;   Obj = '??'
+	),
+	debug(markdown(emphasis), '~q: additionally emphasis: ~p',
+	      [Obj, Tokens]).
+
+emphasis_before(Before) -->
+	[Before],
+	{ emphasis_start_sep(Before) }.
+
+emphasis_start_sep(' ').
+emphasis_start_sep('<').
+emphasis_start_sep('{').
+emphasis_start_sep('(').
+emphasis_start_sep('[').
+emphasis_start_sep(',').
+emphasis_start_sep(':').
+emphasis_start_sep(';').
+
+emphasis_start(Which), [w(Word)] -->
+	emphasis(Which),
+	[w(Word)].
+
+emphasis(**)   --> [*, *].
+emphasis(*)    --> [*].
+emphasis('__') --> ['_', '_'].
+emphasis('_')  --> ['_'].
+
+emphasis_end(Which), [After] -->
+	emphasis(Which),
+	[ After ], !,
+	{ After \= w(_) }.
+emphasis_end(Which) -->
+	emphasis(Which).
+
+% these characters should not be before a closing * or _.
+
+emphasis_after_sep(' ').
+emphasis_after_sep('(').
+emphasis_after_sep('[').
+emphasis_after_sep('<').
+emphasis_after_sep('=').
+emphasis_after_sep('+').
+emphasis_after_sep('\\').
+emphasis_after_sep('@').
 
 
 %%	arg_list(-Atoms) is nondet.
@@ -703,20 +990,21 @@ arg_list_close([H|T], Depth) -->
 	arg_list_close(T, Depth).
 
 
-%%	term_face(+Term, +Vars, -Face) is semidet.
+%%	term_face(+Text, +Term, +Vars, -Face) is semidet.
 %
 %	Process embedded Prolog-terms. Currently   processes  Alias(Arg)
 %	terms that refer to files.  Future   versions  will also provide
 %	pretty-printing of Prolog terms.
 
-term_face(Term, _Vars, \file(Name, FileOptions)) :-
+term_face(_Text, Term, _Vars, \file(Name, FileOptions)) :-
 	ground(Term),
 	compound(Term),
 	Term =.. [Alias,_],
 	user:file_search_path(Alias, _),
 	existing_file(Term, FileOptions, []), !,
 	format(atom(Name), '~q', [Term]).
-
+term_face(Text, Term, Vars, Face) :-
+	code_face(Text, Term, Vars, Face).
 
 %%	make_label(+Parts, -Label) is det.
 %
@@ -786,6 +1074,9 @@ nv_pair(Option) -->
 %	    $ '<' URL '>' :
 %	    Be more relaxed on the URL specification.
 
+:- multifile
+	user:url_path/2.
+
 wiki_link(\file(Name, FileOptions), Options) -->
 	file_name(Base, Ext),
 	{ file_name_extension(Base, Ext, Name),
@@ -817,7 +1108,7 @@ wiki_link(a(href(Ref), Label), Options) -->
 	  ->  Term =.. [Alias,'.']
 	  ;   Term =.. [Alias,Local]
 	  ),
-	  expand_url_path(Term, Ref),
+	  catch(expand_url_path(Term, Ref), _, fail),
 	  option(label(Label), Options, Ref)
 	}.
 wiki_link(a(href(Ref), Label), Options) -->
@@ -881,6 +1172,9 @@ resolve_file(_, Options, Options).
 
 
 existing_file(Name, Options, Rest) :-
+	catch(existing_file_p(Name, Options, Rest), _, fail).
+
+existing_file_p(Name, Options, Rest) :-
 	nb_current(pldoc_file, RelativeTo),
 	RelativeTo \== [],
 	(   compound(Name)
@@ -958,14 +1252,17 @@ url_protocol(mailto).
 
 peek_end_url(space) -->
 	peek(End),
-	{ space_atom(End) }, !.
+	{ space_token(End) }, !.
 peek_end_url(space, [], []) :- !.
 peek_end_url(Token) -->
 	peek(Token), !.
 
-space_atom(' ').
-space_atom('\r').
-space_atom('\n').
+space_token(' ') :- !.
+space_token('\r') :- !.
+space_token('\n') :- !.
+space_token(T) :-
+	\+ atom(T),			% high level format like p(...)
+	\+ T = w(_).
 
 %%	autolink_extension(?Ext, ?Type) is nondet.
 %
@@ -975,6 +1272,7 @@ space_atom('\n').
 autolink_extension(Ext, prolog) :-
 	user:prolog_file_type(Ext,prolog).
 autolink_extension(txt, wiki).
+autolink_extension(md,  wiki).
 autolink_extension(gif, image).
 autolink_extension(png, image).
 autolink_extension(jpg, image).
@@ -1028,8 +1326,8 @@ normalise_white_space2(Text) -->
 	non_ws(Text, Tail),
 	ws,
 	(   eos
-	->  { Tail = "" }
-	;   { Tail = [32|T2] },
+	->  { Tail = [] }
+	;   { Tail = [0'\s|T2] },
 	    normalise_white_space2(T2)
 	).
 
@@ -1042,20 +1340,29 @@ normalise_white_space2(Text) -->
 %
 %	Convert Indent-Codes into Indent-Tokens
 
-tokenize_lines([], []) :- !.
-tokenize_lines(Lines, [Pre|T]) :-
-	verbatim(Lines, Pre, RestLines), !,
-	tokenize_lines(RestLines, T).
-tokenize_lines([I-H0|T0], [I-H|T]) :-
+tokenize_lines(Lines, TokenLines) :-
+	tokenize_lines(Lines, -1, TokenLines).
+
+tokenize_lines([], _, []) :- !.
+tokenize_lines(Lines, Indent, [Pre|T]) :-
+	verbatim(Lines, Indent, Pre, RestLines), !,
+	tokenize_lines(RestLines, Indent, T).
+tokenize_lines([I-H0|T0], Indent0, [I-H|T]) :-
 	phrase(line_tokens(H), H0),
-	tokenize_lines(T0, T).
+	(   H == []
+	->  Indent = Indent0
+	;   Indent = I
+	),
+	tokenize_lines(T0, Indent, T).
 
 
 %%	line_tokens(-Tokens:list)// is det.
 %
 %	Create a list of tokens, where  is  token   is  either  a ' ' to
 %	denote spaces, a  term  w(Word)  denoting   a  word  or  an atom
-%	denoting a punctuation character.
+%	denoting a punctuation  character.   Underscores  (_)  appearing
+%	inside an alphanumerical string are considered part of the word.
+%	E.g., "hello_world_" tokenizes into [w(hello_world), '_'].
 
 line_tokens([H|T]) -->
 	line_token(H), !,
@@ -1085,24 +1392,49 @@ word([0'_, C1|T]) -->
 word([]) -->
 	[].
 
+alphas([C0|T]) -->
+	[C0],  { code_type(C0, alpha) }, !,
+	alphas(T).
+alphas([]) -->
+	[].
 
-%%	verbatim(+Lines, -Pre, -RestLines) is det.
+%%	verbatim(+Lines, +EnvIndent, -Pre, -RestLines) is det.
 %
 %	Extract a verbatim environment.  The  returned   Pre  is  of the
-%	format pre(Class, String). The indentation of  the leading == is
-%	substracted from the indentation of the verbatim lines.
+%	format pre(Attributes, String). The indentation   of the leading
+%	fence is substracted from the indentation of the verbatim lines.
+%	Two types of fences are supported:   the  traditional =|==|= and
+%	the Doxygen =|~~~|= (minimum  3   =|~|=  characters), optionally
+%	followed by =|{.ext}|= to indicate the language.
 %
 %	Verbatim environment is delimited as
 %
-%	==
-%		...,
-%		verbatim(Lines, Pre, Rest)
-%		...,
-%	==
+%	  ==
+%	    ...,
+%	    verbatim(Lines, Pre, Rest)
+%	    ...,
+%	  ==
+%
+%	In addition, a verbatim environment may  simply be indented. The
+%	restrictions are described in the documentation.
 
-verbatim([Indent-"=="|Lines], Indent-pre(class(code),Pre), RestLines) :-
-	verbatim_body(Lines, Indent, [10|PreCodes], [],
-		      [Indent-"=="|RestLines]), !,
+verbatim(Lines, _,
+	 Indent-pre([class(code), ext(Ext)],Pre),
+	 RestLines) :-
+	skip_empty_lines(Lines, [Indent-FenceLine|CodeLines]),
+	verbatim_fence(FenceLine, Fence, Ext),
+	verbatim_body(CodeLines, Indent, [10|PreCodes], [],
+		      [Indent-Fence|RestLines]), !,
+	atom_codes(Pre, PreCodes).
+verbatim([_-[],Indent-Line|Lines], EnvIndent,
+	 Indent-pre(class(code),Pre),
+	 RestLines) :-
+	EnvIndent >= 0,
+	Indent >= EnvIndent+4, Indent =< EnvIndent+8,
+	valid_verbatim_opening(Line),
+	indented_verbatim_body([Indent-Line|Lines], Indent,
+			       CodeLines, RestLines), !,
+	lines_code_text(CodeLines, Indent, [10|PreCodes]),
 	atom_codes(Pre, PreCodes).
 
 verbatim_body(Lines, _, PreT, PreT, Lines).
@@ -1111,6 +1443,66 @@ verbatim_body([I-L|Lines], Indent, [10|Pre], PreT, RestLines) :-
 	phrase(pre_indent(PreI), Pre, PreT0),
 	verbatim_line(L, PreT0, PreT1),
 	verbatim_body(Lines, Indent, PreT1, PreT, RestLines).
+
+verbatim_fence(Line, Fence, '') :-
+	Line == [0'=,0'=], !,
+	Fence = Line.
+verbatim_fence(Line, Fence, Ext) :-
+	tilde_fence(Line, Fence, 0, Ext).
+
+tilde_fence([0'~|T0], [0'~|F0], C0, Ext) :- !,
+	C1 is C0+1,
+	tilde_fence(T0, F0, C1, Ext).
+tilde_fence(List, [], C, Ext) :-
+	C >= 3,
+	(   List == []
+	->  Ext = ''
+	;   phrase(fence_ext(ExtCodes), List),
+	    atom_codes(Ext, ExtCodes)
+	).
+
+fence_ext(Ext) -->
+	"{.", alphas(Ext), "}".
+
+%%	indented_verbatim_body(+Lines, +Indent, -CodeLines, -RestLines)
+%
+%	Takes more verbatim lines. The input   ends  with the first line
+%	that is indented less than Indent. There cannot be more than one
+%	consequtive empty line in the verbatim body.
+
+indented_verbatim_body([I-L|T0], Indent, [I-L|T], RestLines) :-
+	L \== [], I >= Indent, !,
+	indented_verbatim_body(T0, Indent, T, RestLines).
+indented_verbatim_body([I0-[],I-L|T0], Indent, [I0-[],I-L|T], RestLines) :-
+	I >= Indent,
+	valid_verbatim_opening(L),
+	indented_verbatim_body(T0, Indent, T, RestLines).
+indented_verbatim_body(Lines, _, [], Lines).
+
+%%	valid_verbatim_opening(+Line) is semidet.
+%
+%	Tests that line does not look like a list item or table.
+
+valid_verbatim_opening([0'||_]) :- !, fail.
+valid_verbatim_opening(Line) :-
+	Line \== [],
+	\+ ( phrase(line_tokens(Tokens), Line),
+	     list_item_prefix(_Type, Tokens, _Rest)
+	   ).
+
+%%	lines_code_text(+Lines, +Indent, -Codes) is det.
+%
+%	Extract the actual code content from a list of line structures.
+
+lines_code_text([], _, []).
+lines_code_text([_-[]|T0], Indent, [10|T]) :- !,
+	lines_code_text(T0, Indent, T).
+lines_code_text([I-Line|T0], Indent, [10|T]) :-
+	PreI is I-Indent,
+	phrase(pre_indent(PreI), T, T1),
+	verbatim_line(Line, T1, T2),
+	lines_code_text(T0, Indent, T2).
+
 
 %%	pre_indent(+Indent)// is det.
 %
@@ -1185,8 +1577,8 @@ skip_empty_lines([_-[]|Lines0], Lines) :- !,
 	skip_empty_lines(Lines0, Lines).
 skip_empty_lines(Lines, Lines).
 
-end_sentence("", "").
-end_sentence(" ", ".") :- !.
+end_sentence([], []).
+end_sentence([0'\s], [0'.]) :- !.
 end_sentence([H|T0], [H|T]) :-
 	end_sentence(T0, T).
 
@@ -1236,9 +1628,11 @@ stars --> "*", !, stars.
 %	line-position at the end of the leading characters.
 
 take_prefix(Prefixes, I0, I) -->
-	{ member(Prefix, Prefixes) },
-	prefix(Prefix), !,
-	{ string_update_linepos(Prefix, I0, I) }.
+	{ member(Prefix, Prefixes),
+	  string_codes(Prefix, PrefixCodes)
+	},
+	prefix(PrefixCodes), !,
+	{ string_update_linepos(PrefixCodes, I0, I) }.
 take_prefix(_, I, I) -->
 	[].
 
@@ -1425,7 +1819,7 @@ tokens_no_whitespace([Word|T]) -->
 	tokens_no_whitespace(T).
 tokens_no_whitespace([H|T]) -->
 	[H],
-	{ \+ space_atom(H) },
+	{ \+ space_token(H) },
 	tokens_no_whitespace(T).
 
 token(Token) -->

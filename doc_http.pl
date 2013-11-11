@@ -116,8 +116,7 @@ http:location(pldoc_resource, Path, []) :-
 
 doc_server(Port) :-
 	doc_server(Port,
-		   [ workers(1),
-		     allow(localhost),
+		   [ allow(localhost),
 		     allow(ip(127,0,0,1)) % Windows ip-->host often fails
 		   ]).
 
@@ -127,9 +126,7 @@ doc_server(Port, Options) :-
 	prepare_editor,
 	host_access_options(Options, ServerOptions),
 	merge_options(ServerOptions,
-		      [ port(Port),
-			timeout(60),
-			keep_alive_timeout(1)
+		      [ port(Port)
 		      ], HTTPOptions),
 	http_server(http_dispatch, HTTPOptions),
 	assertz(doc_server_port(Port)),
@@ -599,7 +596,7 @@ clean_path(Path, Path).
 
 %%	pldoc_man(+Request)
 %
-%	Handler for /man, offerring one of the parameters:
+%	Handler for /man, offering one of the parameters:
 %
 %	    * predicate=PI
 %	    providing documentation from the manual on the predicate PI.
@@ -612,7 +609,8 @@ pldoc_man(Request) :-
 	http_parameters(Request,
 			[ predicate(PI, [optional(true)]),
 			  function(Fun, [optional(true)]),
-			  'CAPI'(F,     [optional(true)])
+			  'CAPI'(F,     [optional(true)]),
+			  section(Sec,  [optional(true)])
 			]),
 	(   ground(PI)
 	->  split_pi(PI, Obj)
@@ -622,16 +620,21 @@ pldoc_man(Request) :-
 	    Obj = f(Name/Arity)
 	;   ground(F)
 	->  Obj = c(F)
+	;   ground(Sec)
+	->  atom_concat('sec:', Sec, SecID),
+	    Obj = section(SecID)
 	),
 	man_title(Obj, Title),
 	reply_html_page(pldoc(man),
 			title(Title),
 			\man_page(Obj, [])).
 
-man_title(f(Obj), Title) :-
+man_title(f(Obj), Title) :- !,
 	format(atom(Title), 'SWI-Prolog -- function ~w', [Obj]).
-man_title(c(Obj), Title) :-
+man_title(c(Obj), Title) :- !,
 	format(atom(Title), 'SWI-Prolog -- API-function ~w', [Obj]).
+man_title(section(_Id), Title) :- !,
+	format(atom(Title), 'SWI-Prolog -- Manual', []).
 man_title(Obj, Title) :-
 	format(atom(Title), 'SWI-Prolog -- ~w', [Obj]).
 
@@ -651,7 +654,7 @@ split_pi2(Atom, Name/Arity) :-
 	sub_atom(Atom, _, A, 0, ArityA),
 	atom_number(ArityA, Arity), !,
 	sub_atom(Atom, 0, B, _, Name).
-
+split_pi2(Name, Name/_).
 
 
 %%	pldoc_object(+Request)
@@ -681,7 +684,7 @@ pldoc_object(Request) :-
 pldoc_search(Request) :-
 	http_parameters(Request,
 			[ for(For,
-			      [ length > 1,
+			      [ optional(true),
 				description('String to search for')
 			      ]),
 			  in(In,
@@ -717,7 +720,7 @@ pldoc_search(Request) :-
 		 *******************************/
 
 :- public
-	param/2.				% used in pack documentation server
+	param/2.			% used in pack documentation server
 
 param(public_only,
       [ boolean,

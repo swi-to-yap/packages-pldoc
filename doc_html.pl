@@ -3,7 +3,7 @@
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@cs.vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (C): 2009-2012, University of Amsterdam
+    Copyright (C): 2009-2013, University of Amsterdam
 			      VU University Amsterdam
 
     This program is free software; you can redistribute it and/or
@@ -61,14 +61,15 @@
 	    file//2,			% +File, +Options, //
 	    include//3,			% +File, +Type, +Options //
 	    tags//1,			% +Tags, //
-	    term//2,			% +Term, +Bindings, //
+	    term//3,			% +Text, +Term, +Bindings, //
 	    file_header//2,		% +File, +Options, //
 	    objects//2,			% +Objects, +Options, //
 	    object_ref//2,		% +Object, +Options, //
 	    object_href/2,		% +Object, -URL
 	    object_page//2,		% +Object, +Options, //
 	    object_page_header//2,	% +File, +Options, //
-	    object_synopsis//2		% +Object, +Options, //
+	    object_synopsis//2,		% +Object, +Options, //
+	    object_page_footer//2	% +Object, +Options, //
 	  ]).
 :- use_module(library(lists)).
 :- use_module(library(option)).
@@ -102,7 +103,7 @@ extracting module doc_wiki.pl into HTML+CSS.
 */
 
 :- public
-	params//1,			% Called from \Term output created
+	args//1,			% Called from \Term output created
 	pred_dt//3,			% by the wiki renderer
 	section//2,
 	tag//2.
@@ -298,11 +299,22 @@ doc_resources(Options) -->
 %
 %		* doc(PI:predicate_indicator, File:Line, Comment)
 %
+%	We distinguish three different states for FileSpec:
+%
+%	  1. File was cross-referenced with collection enabled.  All
+%	     information is in the xref database.
+%	  2. File was loaded. If comments are not loaded,
+%	     cross-reference the file, while _storing_ the comments
+%	     as the compiler would do.
+%	  3. Neither of the above.  In this case we cross-reference the
+%	     file.
+%
 %	@param FileSpec File specification as used for load_files/2.
 %	@param File	Prolog canonical filename
 
 doc_file_objects(FileSpec, File, Objects, FileOptions, Options) :-
-	xref_current_source(FileSpec), !,
+	xref_current_source(FileSpec),
+	xref_option(FileSpec, comments(collect)), !,
 	File = FileSpec,
 	findall(Object, xref_doc_object(File, Object), Objects0),
 	reply_file_objects(File, Objects0, Objects, FileOptions, Options).
@@ -311,6 +323,7 @@ doc_file_objects(FileSpec, File, Objects, FileOptions, Options) :-
 			   [ file_type(prolog),
 			     access(read)
 			   ]),
+	source_file(File), !,
 	ensure_doc_objects(File),
 	Pos = File:Line,
 	findall(Line-doc(Obj,Pos,Comment),
@@ -318,6 +331,15 @@ doc_file_objects(FileSpec, File, Objects, FileOptions, Options) :-
 	keysort(Pairs, ByLine),
 	pairs_values(ByLine, Objs0),
 	reply_file_objects(File, Objs0, Objects, FileOptions, Options).
+doc_file_objects(FileSpec, File, Objects, FileOptions, Options) :-
+	absolute_file_name(FileSpec, File,
+			   [ file_type(prolog),
+			     access(read)
+			   ]),
+	xref_source(File, [silent(true)]),
+	findall(Object, xref_doc_object(File, Object), Objects0),
+	reply_file_objects(File, Objects0, Objects, FileOptions, Options).
+
 
 reply_file_objects(File, Objs0, Objects, FileOptions, Options) :-
 	module_info(File, ModuleOptions, Options),
@@ -347,12 +369,14 @@ xref_doc_object(File, doc(M:Name/Arity,File:0,Comment)) :-
 	strip_module(Module:Head, M, Plain),
 	functor(Plain, Name, Arity).
 
-%%	ensure_doc_objects(+File)
+%%	ensure_doc_objects(+File) is det.
 %
-%	Ensure we have documentation about  File.   If  the  file is not
-%	loaded or we have no comments for the file because it was loaded
-%	before comment collection was enabled,  run the cross-referencer
-%	on it to collect the comments and meta-information.
+%	Ensure we have documentation about File.  If we have no comments
+%	for the file because it was loaded before comment collection was
+%	enabled, run the cross-referencer on it  to collect the comments
+%	and meta-information.
+%
+%	@param File is a canonical filename that is loaded.
 
 :- dynamic
 	no_comments/2.
@@ -373,8 +397,7 @@ ensure_doc_objects(File) :-
 	    )
 	).
 ensure_doc_objects(File) :-
-	xref_source(File, [silent(true), comments(store)]), !.
-ensure_doc_objects(_).
+	xref_source(File, [silent(true)]).
 
 %%	module_info(+File, -ModuleOptions, +OtherOptions) is det.
 %
@@ -457,8 +480,10 @@ private(Module:PI, _Options) :-
 multifile(Obj, _Options) :-
 	strip_module(user:Obj, Module, PI),
 	pi_to_head(PI, Head),
-	predicate_property(Module:Head, multifile).
-
+	(   predicate_property(Module:Head, multifile)
+	;   xref_module(Source, Module),
+	    xref_defined(Source, Head, multifile(_))
+	), !.
 
 pi_to_head(Var, _) :-
 	var(Var), !, fail.
@@ -487,7 +512,7 @@ file_header(File, Options) -->
 	},
 	file_title([Base, ' -- ', Title], File, Options),
 	{ is_structured_comment(Comment, Prefixes),
-	  string_to_list(Comment, Codes),
+	  string_codes(Comment, Codes),
 	  indented_lines(Codes, Prefixes, Lines),
 	  section_comment_header(Lines, _Header, Lines1),
 	  wiki_lines_to_dom(Lines1, [], DOM)
@@ -638,6 +663,7 @@ object(Obj, Mode0, Mode, Options) -->
 		  doc_comment(Obj, Pos, _Summary, Comment),
 		  Pairs)
 	}, !,
+	{ b_setval(pldoc_object, Obj) },
 	object(Obj, Pairs, Mode0, Mode, Options).
 
 object(Obj, Pairs, Mode0, Mode, Options) -->
@@ -655,7 +681,7 @@ object(Obj, _Pairs, Mode, Mode, _Options) -->
 
 pred_dom(Obj, Options, Pos-Comment, DOM) :-
 	is_structured_comment(Comment, Prefixes),
-	string_to_list(Comment, Codes),
+	string_codes(Comment, Codes),
 	indented_lines(Codes, Prefixes, Lines),
 	strip_module(user:Obj, Module, _),
 	process_modes(Lines, Module, Pos, Modes, Args, Lines1),
@@ -764,7 +790,7 @@ undocumented_pred(Name/Arity, Options) -->
 select_undocumented([], _, _, []).
 select_undocumented([PI|T0], M, Objs, [PI|T]) :-
 	is_pi(PI),
-	\+ in_doc(M:PI, Objs),
+	\+ in_doc(M:PI, Objs), !,
 	select_undocumented(T0, M, Objs, T).
 select_undocumented([_|T0], M, Objs, T) :-
 	select_undocumented(T0, M, Objs, T).
@@ -835,7 +861,8 @@ re_exported_doc([PI|T0], File, Module, REObj, [PI|UnDoc]) :-
 %	    Show the navigation and search header.
 
 object_page(Obj, Options) -->
-	prolog:doc_object_page(Obj, Options).
+	prolog:doc_object_page(Obj, Options), !,
+	object_page_footer(Obj, Options).
 object_page(Obj, Options) -->
 	{ doc_comment(Obj, File:_Line, _Summary, _Comment)
 	}, !,
@@ -851,7 +878,8 @@ object_page(Obj, Options) -->
 		   \object_page_header(-, Options),
 		   \objects([Obj], [synopsis(true)|Options])
 		 ])
-	).
+	),
+	object_page_footer(Obj, Options).
 
 object_page_header(File, Options) -->
 	{ option(header(true), Options, true) }, !,
@@ -870,6 +898,15 @@ file_link(File) -->
 	places_menu(Dir),
 	html([ div(a(href(location_by_id(pldoc_doc)+File), File))
 	     ]).
+
+%%	object_page_footer(+Obj, +Options)// is det.
+%
+%	Call the hook prolog:doc_object_page_footer//2. This hook will
+%	be used to deal with annotations.
+
+object_page_footer(Obj, Options) -->
+	prolog:doc_object_page_footer(Obj, Options).
+object_page_footer(_, _) --> [].
 
 
 %%	object_synopsis(Obj, Options) is det.
@@ -1036,24 +1073,24 @@ tag_title(tbd,    'To be done').
 tag_title(see,    'See also').
 tag_title(error,  'Errors').
 
-%%	params(+Params:list) is det.
+%%	args(+Params:list) is det.
 %
-%	Called from \params(List) created by   doc_wiki.pl.  Params is a
-%	list of param(Name, Descr).
+%	Called from \args(List) created by   doc_wiki.pl.  Params is a
+%	list of arg(Name, Descr).
 
-params(Params) -->
-	html([ dt(class=tag, 'Parameters:'),
-	       dd(table(class=paramlist,
-			\param_list(Params)))
+args(Params) -->
+	html([ dt(class=tag, 'Arguments:'),
+	       dd(table(class=arglist,
+			\arg_list(Params)))
 	     ]).
 
-param_list([]) -->
+arg_list([]) -->
 	[].
-param_list([H|T]) -->
-	param(H),
-	param_list(T).
+arg_list([H|T]) -->
+	argument(H),
+	arg_list(T).
 
-param(param(Name,Descr)) -->
+argument(arg(Name,Descr)) -->
 	html(tr([td(var(Name)), td(class=argdescr, ['- '|Descr])])).
 
 
@@ -1062,7 +1099,7 @@ param(param(Name,Descr)) -->
 		 *******************************/
 
 section(Type, Title) -->
-	{ string_to_list(Title, Codes),
+	{ string_codes(Title, Codes),
 	  wiki_codes_to_dom(Codes, [], Content0),
 	  strip_leading_par(Content0, Content),
 	  make_section(Type, Content, HTML)
@@ -1391,21 +1428,21 @@ pred_det(Det) -->
 	html([' is ', b(class=det, Det)]).
 
 
-%%	term(+Term, +Bindings)// is det.
+%%	term(+Text, +Term, +Bindings)// is det.
 %
 %	Process the \term element as produced by doc_wiki.pl.
 %
 %	@tbd	Properly merge with pred_head//1
 
-term(Atom, []) -->
+term(_, Atom, []) -->
 	{ atomic(Atom) }, !,
 	html(span(class=functor, Atom)).
-term(Term, Bindings) -->
+term(_, Term, Bindings) -->
 	{ is_mode(Term is det),		% HACK. Bit too strict?
 	  bind_vars(Bindings)
 	}, !,
 	pred_head(Term).
-term(Term, Bindings) -->
+term(_, Term, Bindings) -->
 	{ bind_vars(Term, Bindings) },
 	argtype(Term).
 
@@ -1628,6 +1665,8 @@ object_href(M:PI0, HREF, Options) :-
 	uri_data(path, Components, LocalFile),
 	uri_data(fragment, Components, PIS),
 	uri_components(HREF, Components).
+object_href(Obj, HREF, _Options) :-
+	prolog:doc_object_href(Obj, HREF), !.
 object_href(Obj0, HREF, _Options) :-
 	localise_object(Obj0, Obj),
 	term_to_string(Obj, String),
@@ -1673,6 +1712,8 @@ term_to_string(Term, String) :-
 
 object_link(Obj, Options) -->
 	prolog:doc_object_link(Obj, Options), !.
+object_link(f(Name/Arity), _Options) --> !,
+	html([Name, /, Arity]).
 object_link(PI, Options) -->
 	{ is_pi(PI) }, !,
 	pi(PI, Options).
@@ -1881,7 +1922,13 @@ include(File, image, Options) -->
 			  type('image/svg+xml')
 			], Attrs)
 	},
-	html(object(Attrs, [])).
+	(   { option(caption(Caption), Options) }
+	->  html(div(class(figure),
+		     [ div(class(image), object(Attrs, [])),
+		       div(class(caption), Caption)
+		     ]))
+	;   html(object(Attrs, []))
+	).
 include(File, image, Options) -->
 	{ file_href(File, HREF, Options), !,
 	  include(image_attribute, Options, Attrs0),
@@ -1891,7 +1938,13 @@ include(File, image, Options) -->
 			  src(HREF)
 			], Attrs)
 	},
-	html(img(Attrs)).
+	(   { option(caption(Caption), Options) }
+	->  html(div(class(figure),
+		     [ div(class(image), img(Attrs)),
+		       div(class(caption), Caption)
+		     ]))
+	;   html(img(Attrs))
+	).
 include(File, wiki, _Options) -->	% [[file.txt]] is included
 	{ access_file(File, read), !,
 	  read_file_to_codes(File, String, []),

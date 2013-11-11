@@ -243,8 +243,10 @@ wiki_file(Dir, Type, Options) -->
 %	for a directory. Files are matched case-insensitively.
 
 wiki_file_type(readme, 'readme').
+wiki_file_type(readme, 'readme.md').
 wiki_file_type(readme, 'readme.txt').
 wiki_file_type(todo,   'todo').
+wiki_file_type(todo,   'todo.md').
 wiki_file_type(todo,   'todo.txt').
 
 %%	file_indices(+Files, +Options)// is det.
@@ -263,9 +265,7 @@ file_indices([H|T], Options) -->
 %	Create an index for File.
 
 file_index(File, Options) -->
-	{ Pos = File:_Line,
-	  findall(doc(Obj,Pos,Summary),
-		  doc_comment(Obj, Pos, Summary, _), Objs0),
+	{ doc_summaries(File, Objs0),
 	  module_info(File, ModuleOptions, Options),
 	  doc_hide_private(Objs0, Objs1, ModuleOptions),
 	  sort(Objs1, Objs)
@@ -273,6 +273,23 @@ file_index(File, Options) -->
 	html([ \file_index_header(File, Options)
 	     | \object_summaries(Objs, File, ModuleOptions)
 	     ]).
+
+doc_summaries(File, Objects) :-
+	xref_current_source(FileSpec),
+	xref_option(FileSpec, comments(collect)), !,
+	Pos = File:0,
+	findall(doc(Obj,Pos,Summary),
+		xref_doc_summary(Obj, Pos, Summary), Objects).
+doc_summaries(File, Objects) :-
+	Pos = File:_Line,
+	findall(doc(Obj,Pos,Summary),
+		doc_comment(Obj, Pos, Summary, _), Objects).
+
+xref_doc_summary(M:Name/Arity, File:_, Summary) :-
+	xref_comment(File, Head, Summary, _Comment),
+	xref_module(File, Module),
+	strip_module(Module:Head, M, Plain),
+	functor(Plain, Name, Arity).
 
 %%	file_index_header(+File, +Options)// is det.
 %
@@ -385,8 +402,12 @@ tag_pub_priv([H|T0], [Tag-H|T], Options) :-
 %
 %	@tbd	Hacky interface.  Do we demand Summary to be in Wiki?
 
+object_summary(doc(Obj, _Pos, _Summary), wiki, Options) --> !,
+	html(tr(class(wiki),
+		[ td(colspan(3), \object_ref(Obj, Options))
+		])).
 object_summary(doc(Obj, _Pos, Summary), _Section, Options) --> !,
-	(   { string_to_list(Summary, Codes),
+	(   { string_codes(Summary, Codes),
 	      wiki_codes_to_dom(Codes, [], DOM0),
 	      strip_leading_par(DOM0, DOM),
 	      (	  private(Obj, Options)
