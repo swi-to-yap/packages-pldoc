@@ -16,7 +16,7 @@ LIBSRCALL=$(addprefix $(srcdir)/, $(LIBALL))
 
 all::
 
-install:	$(LIBSRCALL) $(PUBSRCPL)
+install:	$(LIBSRCALL) $(PUBSRCPL) install-examples
 		mkdir -p $(DESTDIR)$(PLLIBDIR)/pldoc
 		$(INSTALL_DATA) $(LIBSRCALL) $(DESTDIR)$(PLLIBDIR)/pldoc
 		$(INSTALL_DATA) $(srcdir)/README $(DESTDIR)$(PLLIBDIR)/pldoc/README$(TXTEXT)
